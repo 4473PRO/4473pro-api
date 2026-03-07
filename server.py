@@ -50,6 +50,8 @@ IDENTIFICATION RULES:
 - Do NOT judge or flag the TYPE of government-issued photo ID used. That is the FFL's discretion.
 - ONLY flag Q26.a if the ID field is completely blank.
 - A Tennessee Carry Permit, military ID, passport, tribal ID, or any government-issued photo ID is acceptable.
+- Q26b (Supplemental Documentation): ONLY flag Q26b as missing if NO supplemental document is present anywhere in the submitted materials. If a vehicle registration, utility bill, PCS orders, or any other document corroborating the buyer's address is present in the supporting documents — even if not explicitly written in Q26b on the form — mark it as COMPLIANT. The FFL has satisfied the requirement by attaching the document.
+- ACTIVE DUTY MILITARY ADDRESS: Fort Campbell KY/TN and similar dual-state military installations are well-known to FFLs. Do NOT flag interstate transfer concerns for long guns (rifles, shotguns). Federal law permits interstate long gun transfers. Only flag if the transfer involves a handgun and the buyer's state of residence differs from the FFL's state.
 
 SPELLING RULES:
 - If a spelling difference exists between the 4473 and a supporting document (e.g., disposition receipt) → flag as REQUIRES CORRECTION.
@@ -223,6 +225,11 @@ def save_api_key():
     if r.status_code not in [200, 201]:
         return jsonify({"error": "Failed to save key"}), 500
     return jsonify({"success": True})
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8247))
+    app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
