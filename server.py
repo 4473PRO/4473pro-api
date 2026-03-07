@@ -11,9 +11,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 app = Flask(__name__)
 CORS(app, origins=["https://4473pro.com", "https://www.4473pro.com"])
 
+import stripe
+
 SB_URL = os.environ.get("SUPABASE_URL")
 SB_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 ENCRYPTION_KEY = bytes.fromhex(os.environ.get("ENCRYPTION_KEY", "0" * 64))
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+
+# 4473 Pro product IDs — ignore all other Stripe products (e.g. Teachable)
+VALID_PRODUCT_IDS = {"prod_U5zaGkcmpaayRM", "prod_U5zrlcGBf3n0V0"}
 
 SYSTEM_PROMPT = """You are an expert ATF Form 4473 compliance auditor with deep knowledge of federal firearms regulations, ATF instructions, and Gun Control Act requirements. Your job is to carefully examine each Form 4473 and any supporting documents provided, then produce a thorough compliance audit report.
 
@@ -134,7 +141,202 @@ def get_api_key(user_id):
         return encrypted
 
 
-@app.route("/health", methods=["GET"])
+def set_subscription_status(email, status, stripe_customer_id=None, stripe_subscription_id=None):
+    """Find user by email and update their subscription status."""
+    # Look up user in Supabase auth
+    r = requests.get(
+        f"{SB_URL}/auth/v1/admin/users",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    if r.status_code != 200:
+        return False
+    users = r.json().get("users", [])
+    user = next((u for u in users if u.get("email", "").lower() == email.lower()), None)
+    if not user:
+        return False
+
+    update_data = {"subscription_status": status}
+    if stripe_customer_id:
+        update_data["stripe_customer_id"] = stripe_customer_id
+    if stripe_subscription_id:
+        update_data["stripe_subscription_id"] = stripe_subscription_id
+
+    r2 = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update_data
+    )
+    return r2.status_code in [200, 204]
+
+
+def create_supabase_user(email, stripe_customer_id, stripe_subscription_id):
+    """Create a new Supabase user and mark them active."""
+    import secrets, string
+    temp_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(20))
+
+    r = requests.post(
+        f"{SB_URL}/auth/v1/admin/users",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "email": email,
+            "password": temp_password,
+            "email_confirm": True
+        }
+    )
+    if r.status_code not in [200, 201]:
+        return False
+
+    user_id = r.json().get("id")
+    if not user_id:
+        return False
+
+    # Upsert profile
+    requests.post(
+        f"{SB_URL}/rest/v1/profiles",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"
+        },
+        json={
+            "id": user_id,
+            "email": email,
+            "subscription_status": "active",
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id
+        }
+    )
+
+    # Send password reset email so user can set their own password
+    requests.post(
+        f"{SB_URL}/auth/v1/admin/users/{user_id}/recover",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}"
+        }
+    )
+    return True
+
+
+def is_4473_product(session_or_invoice):
+    """Check if a Stripe session/invoice is for a 4473 Pro product."""
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        # For checkout sessions, check line items
+        if "line_items" in str(type(session_or_invoice)):
+            items = stripe.checkout.Session.list_line_items(session_or_invoice.id)
+        else:
+            items = session_or_invoice.get("lines", {}).get("data", [])
+        for item in (items.data if hasattr(items, 'data') else items):
+            price_id = item.get("price", {}).get("id") or getattr(getattr(item, 'price', None), 'id', None)
+            if price_id:
+                price = stripe.Price.retrieve(price_id, expand=["product"])
+                product_id = getattr(price.product, 'id', None) or price.product
+                if product_id in VALID_PRODUCT_IDS:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+@app.route("/stripe-webhook", methods=["POST"])
+def stripe_webhook():
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    if event_type == "checkout.session.completed":
+        email = data.get("customer_details", {}).get("email", "")
+        customer_id = data.get("customer", "")
+        subscription_id = data.get("subscription", "")
+        if not email:
+            return jsonify({"status": "no email"}), 200
+        # Check if it's a 4473 Pro product
+        stripe.api_key = STRIPE_SECRET_KEY
+        try:
+            items = stripe.checkout.Session.list_line_items(data["id"])
+            is_4473 = False
+            for item in items.data:
+                price = stripe.Price.retrieve(item.price.id, expand=["product"])
+                product_id = price.product.id if hasattr(price.product, 'id') else price.product
+                if product_id in VALID_PRODUCT_IDS:
+                    is_4473 = True
+                    break
+            if not is_4473:
+                return jsonify({"status": "not a 4473 Pro product"}), 200
+        except Exception:
+            pass
+
+        # Try to update existing user, or create new one
+        updated = set_subscription_status(email, "active", customer_id, subscription_id)
+        if not updated:
+            create_supabase_user(email, customer_id, subscription_id)
+
+    elif event_type == "invoice.paid":
+        email = data.get("customer_email", "")
+        customer_id = data.get("customer", "")
+        subscription_id = data.get("subscription", "")
+        if not email:
+            return jsonify({"status": "no email"}), 200
+        # Check product
+        is_4473 = False
+        for line in data.get("lines", {}).get("data", []):
+            price_id = line.get("price", {}).get("id")
+            if price_id:
+                try:
+                    stripe.api_key = STRIPE_SECRET_KEY
+                    price = stripe.Price.retrieve(price_id, expand=["product"])
+                    product_id = price.product.id if hasattr(price.product, 'id') else price.product
+                    if product_id in VALID_PRODUCT_IDS:
+                        is_4473 = True
+                        break
+                except Exception:
+                    pass
+        if not is_4473:
+            return jsonify({"status": "not a 4473 Pro product"}), 200
+        set_subscription_status(email, "active", customer_id, subscription_id)
+
+    elif event_type == "customer.subscription.deleted":
+        customer_id = data.get("customer", "")
+        # Find user by stripe_customer_id and deactivate
+        if customer_id:
+            r = requests.get(
+                f"{SB_URL}/rest/v1/profiles?stripe_customer_id=eq.{customer_id}&select=id",
+                headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+            )
+            profiles = r.json()
+            if profiles:
+                user_id = profiles[0]["id"]
+                requests.patch(
+                    f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
+                    headers={
+                        "apikey": SB_SERVICE_KEY,
+                        "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={"subscription_status": "cancelled"}
+                )
+
+    return jsonify({"status": "ok"}), 200
+
+
+
 def health():
     return jsonify({"status": "ok"})
 
