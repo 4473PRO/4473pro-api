@@ -49,9 +49,32 @@ NICS / SECTION C RULES:
 IDENTIFICATION RULES:
 - Do NOT judge or flag the TYPE of government-issued photo ID used. That is the FFL's discretion.
 - ONLY flag Q26.a if the ID field is completely blank.
-- A Tennessee Carry Permit, military ID, passport, tribal ID, or any government-issued photo ID is acceptable.
-- Q26b (Supplemental Documentation): ONLY flag Q26b as missing if NO supplemental document is present anywhere in the submitted materials. If a vehicle registration, utility bill, PCS orders, or any other document corroborating the buyer's address is present in the supporting documents — even if not explicitly written in Q26b on the form — mark it as COMPLIANT. The FFL has satisfied the requirement by attaching the document.
-- ACTIVE DUTY MILITARY ADDRESS: Fort Campbell KY/TN and similar dual-state military installations are well-known to FFLs. Do NOT flag interstate transfer concerns for long guns (rifles, shotguns). Federal law permits interstate long gun transfers. Only flag if the transfer involves a handgun and the buyer's state of residence differs from the FFL's state.
+- Any government-issued photo ID is acceptable: driver's license, state ID, military ID, passport, carry permit, tribal ID, etc.
+- Q26b — SUPPLEMENTAL DOCUMENTATION: Only flag Q26b if there is concrete, visible evidence that the primary ID does not show the buyer's current address. Specifically:
+  - If the ID is from the SAME state as the address in Q10 → Q26b is COMPLIANT. Do not flag, do not add "verify" or "confirm" language. The FFL verified the ID in person.
+  - If supporting documents corroborating the address are present anywhere in the submitted materials → Q26b is COMPLIANT.
+  - If the ID is from a DIFFERENT state than Q10 AND no supplemental document is present → flag Q26b only for HANDGUN transfers. For long gun transfers, an out-of-state ID is acceptable with no supplemental documentation required.
+  - NEVER invent hypothetical address mismatches. If there is no concrete evidence of a problem, mark it compliant.
+  - Tennessee Carry Permits display the holder's address and are valid for establishing residence. Treat them the same as a driver's license for Q26b purposes.
+
+OUT-OF-STATE ID RULES:
+- For LONG GUN transfers: an out-of-state ID is fully acceptable. Federal law permits long gun transfers to residents of any state. Do NOT flag out-of-state IDs or require supplemental documentation for long gun transfers.
+- For HANDGUN transfers: the buyer must be a resident of the FFL's state. If the ID shows a different state than the FFL's state, flag this as REQUIRES CORRECTION.
+
+DISPOSITION RECEIPT NOTATION RULES:
+- NEVER interpret or flag internal FFL notations on disposition receipts. Notes like "Trans", "PSA", "BWO", "SK Trans", transfer codes, source abbreviations, and similar internal recordkeeping notations are for the FFL's internal use only and have no bearing on 4473 compliance.
+- Q8 (Private Party Transfer) should only be evaluated based on what is on the 4473 itself, never based on disposition receipt notations.
+
+CORRECTION RULES:
+- If a field contains a visible correction (crossed out and initialed, correction photocopy attached, or correction log noted) → mark as COMPLIANT with a brief note that the correction is documented. Do NOT use a corrected field to sustain a REQUIRES CORRECTION verdict.
+- A corrected error is not an open error.
+
+AGE CALCULATION RULES:
+- Calculate buyer age carefully. Determine whether the buyer's birthday in the current year has already passed before the transfer date.
+- Example: Buyer born 02/14/2005, transfer date 03/06/2026 → birthday 02/14/2026 has passed → buyer is 21 years old. DO NOT flag as underage.
+- Minimum age for handgun purchase from FFL: 21 years old.
+- Minimum age for long gun purchase from FFL: 18 years old.
+- Only flag underage if the buyer is definitively under the minimum age based on correct calculation.
 
 SPELLING RULES:
 - If a spelling difference exists between the 4473 and a supporting document (e.g., disposition receipt) → flag as REQUIRES CORRECTION.
@@ -225,11 +248,6 @@ def save_api_key():
     if r.status_code not in [200, 201]:
         return jsonify({"error": "Failed to save key"}), 500
     return jsonify({"success": True})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8247))
-    app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
