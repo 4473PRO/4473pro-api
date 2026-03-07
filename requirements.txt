@@ -3,3 +3,5 @@ flask-cors==4.0.0
 requests==2.31.0
 cryptography==41.0.7
 gunicorn==21.2.0
+stripe==7.0.0
+
