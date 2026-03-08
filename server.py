@@ -1646,6 +1646,65 @@ def admin_maintenance():
     return jsonify({"success": True, "mode": mode})
 
 
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+
+@app.route("/support", methods=["POST", "OPTIONS"])
+def support():
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        data = request.get_json(force=True)
+        name          = (data.get("name") or "").strip()
+        email         = (data.get("email") or "").strip()
+        account_email = (data.get("account_email") or "").strip()
+        subject       = (data.get("subject") or "").strip()
+        message       = (data.get("message") or "").strip()
+
+        if not name or not email or not subject or not message:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        account_line = f"<tr><td style='padding:6px 0;color:#888;'>Account Email</td><td style='padding:6px 0;'>{account_email or '(same as above)'}</td></tr>"
+
+        html_body = f"""
+        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#1c1a17;color:#e0d8cc;padding:32px;border-radius:6px;border-top:3px solid #D4A843;">
+          <div style="font-family:monospace;font-size:1.3rem;color:#D4A843;letter-spacing:2px;margin-bottom:24px;">4473 PRO — SUPPORT REQUEST</div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.92rem;margin-bottom:24px;">
+            <tr><td style="padding:6px 0;color:#888;width:140px;">From</td><td style="padding:6px 0;">{name} &lt;{email}&gt;</td></tr>
+            {account_line}
+            <tr><td style="padding:6px 0;color:#888;">Topic</td><td style="padding:6px 0;">{subject}</td></tr>
+          </table>
+          <div style="background:#141210;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:20px;font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">{message}</div>
+          <div style="margin-top:24px;font-size:0.78rem;color:#555;">Reply directly to this email to respond to {name}.</div>
+        </div>
+        """
+
+        if not RESEND_API_KEY:
+            return jsonify({"error": "Email service not configured"}), 500
+
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "4473 Pro Support <support@4473pro.com>",
+                "to": ["info@4473pro.com"],
+                "reply_to": email,
+                "subject": f"[Support] {subject} — {name}",
+                "html": html_body
+            }
+        )
+
+        if r.status_code in [200, 201]:
+            return jsonify({"success": True})
+        else:
+            return jsonify({"error": "Failed to send email"}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8247))
     app.run(host="0.0.0.0", port=port)
