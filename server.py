@@ -836,6 +836,38 @@ def cancel_subscription():
 
 
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+OWNER_ANTHROPIC_KEY = os.environ.get("OWNER_ANTHROPIC_KEY", "")
+
+# Cache freshness threshold — entries older than this trigger a background refresh
+CACHE_MAX_AGE_DAYS = 7
+
+# All state + firearm type combinations for the nightly refresh
+ALL_STATES = [
+    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+    "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+    "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+    "Wisconsin","Wyoming"
+]
+
+STATE_NAME_TO_CODE = {
+    "Alabama":"AL","Alaska":"AK","Arizona":"AZ","Arkansas":"AR","California":"CA",
+    "Colorado":"CO","Connecticut":"CT","Delaware":"DE","Florida":"FL","Georgia":"GA",
+    "Hawaii":"HI","Idaho":"ID","Illinois":"IL","Indiana":"IN","Iowa":"IA",
+    "Kansas":"KS","Kentucky":"KY","Louisiana":"LA","Maine":"ME","Maryland":"MD",
+    "Massachusetts":"MA","Michigan":"MI","Minnesota":"MN","Mississippi":"MS",
+    "Missouri":"MO","Montana":"MT","Nebraska":"NE","Nevada":"NV","New Hampshire":"NH",
+    "New Jersey":"NJ","New Mexico":"NM","New York":"NY","North Carolina":"NC",
+    "North Dakota":"ND","Ohio":"OH","Oklahoma":"OK","Oregon":"OR","Pennsylvania":"PA",
+    "Rhode Island":"RI","South Carolina":"SC","South Dakota":"SD","Tennessee":"TN",
+    "Texas":"TX","Utah":"UT","Vermont":"VT","Virginia":"VA","Washington":"WA",
+    "West Virginia":"WV","Wisconsin":"WI","Wyoming":"WY"
+}
+
+FIREARM_TYPES_FOR_CACHE = ["handgun", "long_gun", "any_firearm", "nfa_item"]
 
 def verify_admin(request):
     """Check admin secret from header."""
@@ -1196,9 +1228,132 @@ Verdict definitions:
 Be accurate and current. If a law has recently changed, note that."""
 
 
+def run_transfer_check_ai(buyer_state, firearm_type, ffl_state="the FFL's state"):
+    """
+    Core AI lookup — calls Anthropic with web_search using the owner key.
+    Returns parsed result dict or raises Exception.
+    """
+    if not OWNER_ANTHROPIC_KEY:
+        raise Exception("Owner API key not configured on server.")
+
+    user_query = (
+        f"I am an FFL dealer. A buyer whose state of residence is {buyer_state} "
+        f"wants to purchase a {firearm_type} from my store. "
+        f"What are the current state-specific restrictions or requirements I need to be aware of for this transfer? "
+        f"Please search for the most current {buyer_state} firearm transfer laws as of today."
+    )
+
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": OWNER_ANTHROPIC_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 2048,
+            "system": TRANSFER_CHECK_PROMPT,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "messages": [{"role": "user", "content": user_query}]
+        },
+        timeout=90
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"AI API returned {response.status_code}: {response.text[:200]}")
+
+    data = response.json()
+    result_text = ""
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            result_text += block.get("text", "")
+
+    if not result_text:
+        raise Exception("No text response from AI.")
+
+    clean = result_text.strip()
+    if clean.startswith("```"):
+        clean = clean.split("```")[1]
+        if clean.startswith("json"):
+            clean = clean[4:]
+    clean = clean.strip()
+
+    try:
+        return json.loads(clean)
+    except Exception:
+        return {
+            "verdict": "VERIFY",
+            "summary": result_text[:500],
+            "restrictions": [],
+            "ffl_action": "Review the information above and consult with a compliance attorney.",
+            "sources": []
+        }
+
+
+def get_cache_entry(state_code, firearm_type):
+    """Fetch a single cache entry from Supabase. Returns entry dict or None."""
+    try:
+        r = requests.get(
+            f"{SB_URL}/rest/v1/transfer_check_cache"
+            f"?state_code=eq.{state_code}&firearm_type=eq.{firearm_type}&select=*",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"},
+            timeout=5
+        )
+        data = r.json()
+        return data[0] if data else None
+    except Exception:
+        return None
+
+
+def upsert_cache_entry(state_code, firearm_type, result):
+    """Write or update a cache entry in Supabase."""
+    payload = {
+        "state_code": state_code,
+        "firearm_type": firearm_type,
+        "verdict": result.get("verdict", "VERIFY"),
+        "summary": result.get("summary", ""),
+        "restrictions": result.get("restrictions", []),
+        "ffl_action": result.get("ffl_action", ""),
+        "sources": result.get("sources", []),
+        "cached_at": "now()"
+    }
+    requests.post(
+        f"{SB_URL}/rest/v1/transfer_check_cache",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"
+        },
+        json=payload,
+        timeout=10
+    )
+
+
+def is_cache_fresh(entry):
+    """Return True if cached_at is within CACHE_MAX_AGE_DAYS."""
+    if not entry or not entry.get("cached_at"):
+        return False
+    from datetime import datetime, timezone, timedelta
+    try:
+        cached_str = entry["cached_at"]
+        # Supabase returns ISO format with timezone
+        cached_at = datetime.fromisoformat(cached_str.replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - cached_at
+        return age < timedelta(days=CACHE_MAX_AGE_DAYS)
+    except Exception:
+        return False
+
+
 @app.route("/transfer-check", methods=["POST", "OPTIONS"])
 def transfer_check():
-    """Real-time state transfer restriction lookup using AI + web search."""
+    """
+    State transfer restriction lookup.
+    Returns cached result instantly if fresh (< 7 days).
+    Falls back to live AI lookup if cache is stale or missing.
+    No longer uses the user's Anthropic API key.
+    """
     if request.method == "OPTIONS":
         return "", 200
 
@@ -1217,77 +1372,146 @@ def transfer_check():
     body = request.get_json()
     buyer_state = body.get("buyer_state", "").strip()
     firearm_type = body.get("firearm_type", "").strip()
+    force_refresh = body.get("force_refresh", False)
 
     if not buyer_state or not firearm_type:
         return jsonify({"error": "buyer_state and firearm_type are required"}), 400
 
-    api_key = get_api_key(user["id"])
-    if not api_key:
-        return jsonify({"error": "No API key saved. Go to Settings to add your Anthropic API key."}), 400
+    # Map full state name to 2-letter code for cache lookup
+    state_code = STATE_NAME_TO_CODE.get(buyer_state, buyer_state[:2].upper())
 
-    ffl_state = profile.get("state", "unknown state")
-    user_query = (
-        f"I am an FFL dealer located in {ffl_state}. "
-        f"A buyer whose state of residence is {buyer_state} wants to purchase a {firearm_type} from my store. "
-        f"What are the current state-specific restrictions or requirements I need to be aware of for this transfer? "
-        f"Please search for the most current {buyer_state} firearm transfer laws."
-    )
+    # ── Cache-first lookup ──────────────────────────────────────
+    if not force_refresh:
+        entry = get_cache_entry(state_code, firearm_type)
+        if entry and is_cache_fresh(entry):
+            result = {
+                "verdict": entry["verdict"],
+                "summary": entry["summary"],
+                "restrictions": entry["restrictions"] if isinstance(entry["restrictions"], list) else [],
+                "ffl_action": entry["ffl_action"],
+                "sources": entry["sources"] if isinstance(entry["sources"], list) else [],
+                "cached_at": entry["cached_at"],
+                "from_cache": True
+            }
+            return jsonify(result)
+
+    # ── Live AI lookup (cache miss, stale, or forced refresh) ──
+    try:
+        ffl_state = profile.get("state", "the FFL's state")
+        result = run_transfer_check_ai(buyer_state, firearm_type, ffl_state)
+        # Store result in cache for next time
+        upsert_cache_entry(state_code, firearm_type, result)
+        result["cached_at"] = None
+        result["from_cache"] = False
+        return jsonify(result)
+    except Exception as e:
+        # If live lookup fails but we have a stale cache entry, return it with a warning
+        stale_entry = get_cache_entry(state_code, firearm_type)
+        if stale_entry:
+            result = {
+                "verdict": stale_entry["verdict"],
+                "summary": stale_entry["summary"],
+                "restrictions": stale_entry["restrictions"] if isinstance(stale_entry["restrictions"], list) else [],
+                "ffl_action": stale_entry["ffl_action"],
+                "sources": stale_entry["sources"] if isinstance(stale_entry["sources"], list) else [],
+                "cached_at": stale_entry["cached_at"],
+                "from_cache": True,
+                "stale_warning": "Live refresh failed. Showing cached data — verify currency before relying on this result."
+            }
+            return jsonify(result)
+        return jsonify({"error": f"Lookup failed: {str(e)}"}), 500
+
+
+@app.route("/admin/cache-status", methods=["GET", "OPTIONS"])
+def admin_cache_status():
+    """Return cache coverage stats for the admin panel."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
 
     try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 2048,
-                "system": TRANSFER_CHECK_PROMPT,
-                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-                "messages": [{"role": "user", "content": user_query}]
-            },
-            timeout=90
+        r = requests.get(
+            f"{SB_URL}/rest/v1/transfer_check_cache?select=state_code,firearm_type,verdict,cached_at&order=cached_at.desc",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"},
+            timeout=10
         )
-
-        if response.status_code != 200:
-            return jsonify({"error": f"AI API error: {response.status_code}"}), 500
-
-        data = response.json()
-
-        # Extract text blocks — skip tool_use and tool_result blocks
-        result_text = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                result_text += block.get("text", "")
-
-        if not result_text:
-            return jsonify({"error": "No response received from AI."}), 500
-
-        # Clean and parse JSON
-        clean = result_text.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        clean = clean.strip()
-
-        try:
-            result = json.loads(clean)
-        except Exception:
-            result = {
-                "verdict": "VERIFY",
-                "summary": result_text[:500],
-                "restrictions": [],
-                "ffl_action": "Review the information above and consult with a compliance attorney.",
-                "sources": []
-            }
-
-        return jsonify(result)
-
+        entries = r.json()
+        total_expected = len(ALL_STATES) * len(FIREARM_TYPES_FOR_CACHE)
+        fresh = sum(1 for e in entries if is_cache_fresh(e))
+        stale = len(entries) - fresh
+        missing = total_expected - len(entries)
+        oldest = min((e["cached_at"] for e in entries if e.get("cached_at")), default=None)
+        newest = max((e["cached_at"] for e in entries if e.get("cached_at")), default=None)
+        return jsonify({
+            "total_entries": len(entries),
+            "total_expected": total_expected,
+            "fresh": fresh,
+            "stale": stale,
+            "missing": missing,
+            "oldest_entry": oldest,
+            "newest_entry": newest,
+            "entries": entries
+        })
     except Exception as e:
-        return jsonify({"error": f"Lookup failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/refresh-cache", methods=["POST", "OPTIONS"])
+def admin_refresh_cache():
+    """
+    Trigger a full cache refresh for all 50 states × 4 firearm types.
+    Runs synchronously in batches with a small delay to respect rate limits.
+    Called nightly via cron-job.org. Protected by admin secret.
+    Optionally accepts specific state_code + firearm_type to refresh a single entry.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not OWNER_ANTHROPIC_KEY:
+        return jsonify({"error": "OWNER_ANTHROPIC_KEY not set on server. Add it to Render environment variables."}), 500
+
+    import time
+
+    body = request.get_json(silent=True) or {}
+    specific_state = body.get("state_code", "").strip().upper()
+    specific_type = body.get("firearm_type", "").strip()
+
+    # Build the work list
+    if specific_state and specific_type:
+        # Single entry refresh (from admin panel "Refresh" button)
+        state_name = next((n for n, c in STATE_NAME_TO_CODE.items() if c == specific_state), specific_state)
+        work = [(specific_state, state_name, specific_type)]
+    else:
+        # Full refresh — all 50 states × 4 firearm types
+        work = [
+            (code, name, ft)
+            for name, code in STATE_NAME_TO_CODE.items()
+            for ft in FIREARM_TYPES_FOR_CACHE
+        ]
+
+    results = {"success": 0, "failed": 0, "errors": []}
+
+    for i, (state_code, state_name, firearm_type) in enumerate(work):
+        try:
+            result = run_transfer_check_ai(state_name, firearm_type)
+            upsert_cache_entry(state_code, firearm_type, result)
+            results["success"] += 1
+        except Exception as e:
+            results["failed"] += 1
+            results["errors"].append(f"{state_code}/{firearm_type}: {str(e)[:100]}")
+
+        # Rate limit courtesy pause: 3 seconds between calls
+        # Yields ~600 seconds (10 min) for full 200-entry refresh
+        if i < len(work) - 1:
+            time.sleep(3)
+
+    return jsonify({
+        "message": f"Cache refresh complete. {results['success']} succeeded, {results['failed']} failed.",
+        "results": results
+    })
 
 
 @app.route("/admin/maintenance", methods=["GET", "POST", "OPTIONS"])
