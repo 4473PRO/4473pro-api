@@ -1460,10 +1460,10 @@ def admin_cache_status():
 @app.route("/admin/refresh-cache", methods=["POST", "OPTIONS"])
 def admin_refresh_cache():
     """
-    Trigger a full cache refresh for all 50 states × 4 firearm types.
-    Runs synchronously in batches with a small delay to respect rate limits.
+    Trigger a cache refresh for all 50 states × 4 firearm types.
+    Full refresh runs in a background thread and returns immediately.
+    Single-entry refresh (state_code + firearm_type) runs synchronously.
     Called nightly via cron-job.org. Protected by admin secret.
-    Optionally accepts specific state_code + firearm_type to refresh a single entry.
     """
     if request.method == "OPTIONS":
         return "", 200
@@ -1474,43 +1474,44 @@ def admin_refresh_cache():
         return jsonify({"error": "OWNER_ANTHROPIC_KEY not set on server. Add it to Render environment variables."}), 500
 
     import time
+    import threading
 
     body = request.get_json(silent=True) or {}
     specific_state = body.get("state_code", "").strip().upper()
     specific_type = body.get("firearm_type", "").strip()
 
-    # Build the work list
+    # Single entry refresh — run synchronously (fast, ~30 sec)
     if specific_state and specific_type:
-        # Single entry refresh (from admin panel "Refresh" button)
         state_name = next((n for n, c in STATE_NAME_TO_CODE.items() if c == specific_state), specific_state)
-        work = [(specific_state, state_name, specific_type)]
-    else:
-        # Full refresh — all 50 states × 4 firearm types
+        try:
+            result = run_transfer_check_ai(state_name, specific_type)
+            upsert_cache_entry(specific_state, specific_type, result)
+            return jsonify({"message": f"Refreshed {specific_state}/{specific_type} successfully.", "results": {"success": 1, "failed": 0, "errors": []}})
+        except Exception as e:
+            return jsonify({"message": "Refresh failed.", "results": {"success": 0, "failed": 1, "errors": [str(e)]}}), 500
+
+    # Full refresh — run in background thread, respond immediately
+    def run_full_refresh():
         work = [
             (code, name, ft)
             for name, code in STATE_NAME_TO_CODE.items()
             for ft in FIREARM_TYPES_FOR_CACHE
         ]
+        for i, (state_code, state_name, firearm_type) in enumerate(work):
+            try:
+                result = run_transfer_check_ai(state_name, firearm_type)
+                upsert_cache_entry(state_code, firearm_type, result)
+            except Exception:
+                pass  # Individual failures are silent — cron will retry nightly
+            if i < len(work) - 1:
+                time.sleep(3)
 
-    results = {"success": 0, "failed": 0, "errors": []}
-
-    for i, (state_code, state_name, firearm_type) in enumerate(work):
-        try:
-            result = run_transfer_check_ai(state_name, firearm_type)
-            upsert_cache_entry(state_code, firearm_type, result)
-            results["success"] += 1
-        except Exception as e:
-            results["failed"] += 1
-            results["errors"].append(f"{state_code}/{firearm_type}: {str(e)[:100]}")
-
-        # Rate limit courtesy pause: 3 seconds between calls
-        # Yields ~600 seconds (10 min) for full 200-entry refresh
-        if i < len(work) - 1:
-            time.sleep(3)
+    thread = threading.Thread(target=run_full_refresh, daemon=True)
+    thread.start()
 
     return jsonify({
-        "message": f"Cache refresh complete. {results['success']} succeeded, {results['failed']} failed.",
-        "results": results
+        "message": "Full cache refresh started in background. All 200 entries will be updated over the next 10–15 minutes. Click 'Reload Stats' to check progress.",
+        "results": {"success": 0, "failed": 0, "errors": []}
     })
 
 
