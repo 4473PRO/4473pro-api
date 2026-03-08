@@ -221,10 +221,100 @@ def create_supabase_user(email, stripe_customer_id, stripe_subscription_id):
         f"{SB_URL}/auth/v1/admin/users/{user_id}/recover",
         headers={
             "apikey": SB_SERVICE_KEY,
-            "Authorization": f"Bearer {SB_SERVICE_KEY}"
-        }
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"redirect_to": "https://4473pro.com/set-password.html"}
     )
     return True
+
+
+@app.route("/claim-account", methods=["POST", "OPTIONS"])
+def claim_account():
+    """Called from success.html after Stripe checkout. Returns a session token so the user
+    can set their password immediately without needing an email link."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    body = request.get_json()
+    session_id = body.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        session = stripe.checkout.Session.retrieve(session_id)
+        email = session.get("customer_details", {}).get("email", "") or session.get("customer_email", "")
+        if not email:
+            return jsonify({"error": "Could not determine email from session"}), 400
+
+        # Verify this is a 4473 Pro purchase
+        line_items = stripe.checkout.Session.list_line_items(session_id)
+        is_valid = False
+        for item in line_items.data:
+            price_id = getattr(getattr(item, 'price', None), 'id', None)
+            if price_id:
+                price = stripe.Price.retrieve(price_id, expand=["product"])
+                product_id = price.product.id if hasattr(price.product, 'id') else price.product
+                if product_id in VALID_PRODUCT_IDS:
+                    is_valid = True
+                    break
+        if not is_valid:
+            return jsonify({"error": "Not a valid 4473 Pro purchase"}), 403
+
+        # Look up user in Supabase
+        r = requests.get(
+            f"{SB_URL}/auth/v1/admin/users",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        )
+        users = r.json().get("users", [])
+        user = next((u for u in users if u.get("email", "").lower() == email.lower()), None)
+        if not user:
+            return jsonify({"error": "Account not ready yet. Please wait a moment and try again."}), 404
+
+        # Generate a magic link / sign-in link for the user
+        r2 = requests.post(
+            f"{SB_URL}/auth/v1/admin/users/{user['id']}/magic-link",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"email": email}
+        )
+
+        # Use the OTP endpoint instead to get a token directly
+        r3 = requests.post(
+            f"{SB_URL}/auth/v1/admin/generate_link",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"type": "magiclink", "email": email}
+        )
+
+        if r3.status_code in [200, 201]:
+            link_data = r3.json()
+            # Extract the token from the generated link
+            action_link = link_data.get("action_link", "")
+            # Parse token from link
+            import urllib.parse
+            parsed = urllib.parse.urlparse(action_link)
+            fragment = urllib.parse.parse_qs(parsed.fragment)
+            access_token = fragment.get("access_token", [None])[0]
+            refresh_token = fragment.get("refresh_token", [None])[0]
+            if access_token:
+                return jsonify({
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "email": email
+                })
+
+        return jsonify({"error": "Could not generate login token. Please use the forgot password link."}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 def is_4473_product(session_or_invoice):
