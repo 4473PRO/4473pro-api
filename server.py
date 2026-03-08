@@ -111,7 +111,7 @@ def get_user_from_token(token):
 
 def get_profile(user_id):
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status",
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     data = r.json()
@@ -341,6 +341,79 @@ def health():
     return jsonify({"status": "ok"})
 
 
+def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=None):
+    prompt = SYSTEM_PROMPT
+    if ccw_exempt and ccw_permit_name:
+        prompt += f"""
+
+STATE-SPECIFIC RULE — CCW NICS EXEMPTION: This FFL's state allows firearm transfers without a NICS background check when the buyer presents a valid concealed carry permit. The permit name in this state is: {ccw_permit_name}.
+If the buyer has presented a valid {ccw_permit_name} as their ID or supporting document, Section C NICS fields are NOT required — treat them as N/A and do not flag them as missing.
+Do NOT flag a missing NICS check when a valid {ccw_permit_name} is documented on the form.
+IMPORTANT: The permit must have been issued within the last 5 years to qualify as a NICS alternative."""
+    if business_name:
+        prompt += f"
+
+FFL BUSINESS: This audit is being run for {business_name}."
+    return prompt
+
+
+@app.route("/save-profile", methods=["POST", "OPTIONS"])
+def save_profile():
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    body = request.get_json()
+    update_data = {
+        "onboarding_completed": True,
+        "business_name": body.get("business_name", ""),
+        "ffl_number": body.get("ffl_number", ""),
+        "phone": body.get("phone", ""),
+        "state": body.get("state", ""),
+        "monthly_transfers": body.get("monthly_transfers", ""),
+    }
+
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update_data
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to save profile"}), 500
+    return jsonify({"success": True})
+
+
+@app.route("/get-profile", methods=["GET", "OPTIONS"])
+def get_profile_route():
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    profile = get_profile(user["id"])
+    if not profile:
+        return jsonify({"error": "Profile not found"}), 404
+
+    return jsonify(profile)
+
+
 @app.route("/audit", methods=["POST", "OPTIONS"])
 def audit():
     if request.method == "OPTIONS":
@@ -380,6 +453,11 @@ def audit():
             "source": {"type": "base64", "media_type": "application/pdf", "data": file_data}
         }
 
+    ccw_exempt = profile.get("ccw_exempt", False)
+    ccw_permit_name = profile.get("ccw_permit_name", "")
+    business_name = profile.get("business_name", "")
+    system_prompt = build_system_prompt(ccw_exempt, ccw_permit_name, business_name)
+
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -390,7 +468,7 @@ def audit():
         json={
             "model": "claude-sonnet-4-6",
             "max_tokens": 4096,
-            "system": SYSTEM_PROMPT,
+            "system": system_prompt,
             "messages": [{
                 "role": "user",
                 "content": [
