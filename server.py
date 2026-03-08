@@ -1515,6 +1515,70 @@ def admin_refresh_cache():
     })
 
 
+@app.route("/admin/cancel-subscription/<user_id>", methods=["POST", "OPTIONS"])
+def admin_cancel_subscription(user_id):
+    """Admin: immediately cancel a user's Stripe subscription and mark account cancelled."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Get profile
+    pr = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=stripe_subscription_id,email,subscription_status",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    profiles = pr.json()
+    if not profiles or not profiles[0]:
+        return jsonify({"error": "User not found"}), 404
+
+    profile = profiles[0]
+    sub_id = profile.get("stripe_subscription_id")
+
+    body = request.get_json(silent=True) or {}
+    immediate = body.get("immediate", True)  # default: cancel immediately
+
+    # Cancel in Stripe if subscription exists
+    stripe_result = None
+    if sub_id:
+        try:
+            stripe.api_key = STRIPE_SECRET_KEY
+            if immediate:
+                stripe.Subscription.cancel(sub_id)
+            else:
+                stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+            stripe_result = "cancelled" if immediate else "cancel_at_period_end"
+        except Exception as e:
+            # If sub not found in Stripe, still update Supabase
+            stripe_result = f"stripe_error: {str(e)}"
+
+    # Update Supabase profile
+    import datetime
+    update = {
+        "subscription_status": "cancelled",
+        "cancelled_at": datetime.datetime.utcnow().isoformat()
+    }
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to update Supabase profile"}), 500
+
+    return jsonify({
+        "success": True,
+        "user_id": user_id,
+        "email": profile.get("email"),
+        "stripe_result": stripe_result,
+        "immediate": immediate
+    })
+
+
 @app.route("/admin/maintenance", methods=["GET", "POST", "OPTIONS"])
 def admin_maintenance():
     """Get or set maintenance mode."""
