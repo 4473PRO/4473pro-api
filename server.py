@@ -977,7 +977,7 @@ def admin_accounts():
         return jsonify({"error": "Unauthorized"}), 401
 
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes&order=id.desc",
+        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes&order=created_at.desc",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     return jsonify(r.json())
@@ -1577,6 +1577,37 @@ def admin_cancel_subscription(user_id):
         "stripe_result": stripe_result,
         "immediate": immediate
     })
+
+
+@app.route("/admin/reactivate-subscription/<user_id>", methods=["POST", "OPTIONS"])
+def admin_reactivate_subscription(user_id):
+    """Admin: reactivate a cancelled account (Supabase only — no Stripe sub restoration)."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    pr = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=email,subscription_status",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    profiles = pr.json()
+    if not profiles or not profiles[0]:
+        return jsonify({"error": "User not found"}), 404
+
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"subscription_status": "active", "cancelled_at": None}
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to update profile"}), 500
+
+    return jsonify({"success": True, "email": profiles[0].get("email")})
 
 
 @app.route("/admin/maintenance", methods=["GET", "POST", "OPTIONS"])
