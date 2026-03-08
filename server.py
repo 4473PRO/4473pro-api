@@ -696,6 +696,39 @@ def audit():
         custom_rules=profile.get("custom_rules", "")
     )
 
+    # Inject destination-state restrictions if buyer state provided
+    buyer_state = body.get("buyerState", "").strip().upper()
+    if buyer_state and len(buyer_state) == 2:
+        try:
+            sr = requests.get(
+                f"{SB_URL}/rest/v1/state_transfer_restrictions?state_code=eq.{buyer_state}&active=eq.true",
+                headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"},
+                timeout=5
+            )
+            restrictions = sr.json()
+            if restrictions:
+                state_name = restrictions[0].get("state_name", buyer_state)
+                block_items = [r for r in restrictions if r["restriction_level"] == "block"]
+                verify_items = [r for r in restrictions if r["restriction_level"] == "verify"]
+                note_items = [r for r in restrictions if r["restriction_level"] == "note"]
+                state_section = f"\n\nDESTINATION-STATE RESTRICTIONS — BUYER IS A {state_name.upper()} RESIDENT:"
+                if block_items:
+                    state_section += "\nThe following restrictions BLOCK or prevent this transfer unless documented exceptions are present:"
+                    for r in block_items:
+                        state_section += f"\n• [{r['firearm_type'].upper()}] {r['description']}"
+                if verify_items:
+                    state_section += "\nThe following items REQUIRE VERIFICATION before transfer:"
+                    for r in verify_items:
+                        state_section += f"\n• [{r['firearm_type'].upper()}] {r['description']}"
+                if note_items:
+                    state_section += "\nAdditional notes for this buyer's state:"
+                    for r in note_items:
+                        state_section += f"\n• [{r['firearm_type'].upper()}] {r['description']}"
+                state_section += f"\nLast verified: {restrictions[0].get('last_verified', 'unknown')}. Flag any missing documentation required by these state laws."
+                system_prompt += state_section
+        except Exception:
+            pass  # Fail silently — don't block the audit if state lookup fails
+
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -1026,6 +1059,224 @@ def admin_update_account(user_id):
     if r.status_code not in [200, 204]:
         return jsonify({"error": "Update failed"}), 500
     return jsonify({"success": True})
+
+
+@app.route("/state-restrictions", methods=["GET", "OPTIONS"])
+def get_state_restrictions():
+    """Public endpoint — returns all active state restrictions."""
+    if request.method == "OPTIONS":
+        return "", 200
+    r = requests.get(
+        f"{SB_URL}/rest/v1/state_transfer_restrictions?active=eq.true&order=state_code.asc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    return jsonify(r.json())
+
+
+@app.route("/state-restrictions/<state_code>", methods=["GET", "OPTIONS"])
+def get_state_restrictions_by_state(state_code):
+    """Get restrictions for a specific state."""
+    if request.method == "OPTIONS":
+        return "", 200
+    r = requests.get(
+        f"{SB_URL}/rest/v1/state_transfer_restrictions?state_code=eq.{state_code.upper()}&active=eq.true&order=firearm_type.asc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    return jsonify(r.json())
+
+
+@app.route("/admin/state-restrictions", methods=["GET", "POST", "OPTIONS"])
+def admin_state_restrictions():
+    """Admin — list all or add a restriction."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if request.method == "GET":
+        r = requests.get(
+            f"{SB_URL}/rest/v1/state_transfer_restrictions?order=state_code.asc,firearm_type.asc",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        )
+        return jsonify(r.json())
+
+    # POST — add new restriction
+    body = request.get_json()
+    required = ["state_code", "state_name", "firearm_type", "restriction_type", "restriction_level", "description"]
+    for f in required:
+        if not body.get(f):
+            return jsonify({"error": f"Missing required field: {f}"}), 400
+    body["updated_at"] = "now()"
+    body["verified_by"] = "admin"
+    r = requests.post(
+        f"{SB_URL}/rest/v1/state_transfer_restrictions",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        },
+        json=body
+    )
+    if r.status_code not in [200, 201]:
+        return jsonify({"error": "Failed to add restriction"}), 500
+    return jsonify(r.json())
+
+
+@app.route("/admin/state-restrictions/<restriction_id>", methods=["POST", "DELETE", "OPTIONS"])
+def admin_state_restriction(restriction_id):
+    """Admin — update or deactivate a restriction."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if request.method == "DELETE":
+        r = requests.patch(
+            f"{SB_URL}/rest/v1/state_transfer_restrictions?id=eq.{restriction_id}",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"active": False, "updated_at": "now()"}
+        )
+        return jsonify({"success": r.status_code in [200, 204]})
+
+    body = request.get_json()
+    body["updated_at"] = "now()"
+    body["verified_by"] = "admin"
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/state_transfer_restrictions?id=eq.{restriction_id}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=body
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Update failed"}), 500
+    return jsonify({"success": True})
+
+
+TRANSFER_CHECK_PROMPT = """You are a firearm transfer compliance specialist with expertise in state firearm laws across all 50 US states.
+
+A Federal Firearms Licensee (FFL) is asking whether they can transfer a firearm to a buyer who is a resident of a specific state.
+
+IMPORTANT RULES:
+- Federal law generally requires an FFL to conduct the transfer through a dealer in the BUYER'S home state for handguns
+- For long guns, federal law permits direct transfer if legal in BOTH the FFL's state AND the buyer's state
+- Many states have ADDITIONAL requirements beyond federal law (waiting periods, permits, registrations, etc.)
+- Your job is to identify these state-specific restrictions clearly and accurately
+
+You MUST search the web for current information about the buyer's state firearm laws before answering. Laws change frequently.
+
+Respond ONLY with a valid JSON object — no preamble, no markdown, no explanation outside the JSON. Use this exact structure:
+{
+  "verdict": "CLEAR" | "RESTRICTED" | "BLOCKED" | "VERIFY",
+  "summary": "2-3 sentence plain English summary of the situation",
+  "restrictions": [
+    {
+      "type": "permit" | "wait" | "block" | "other",
+      "label": "Short restriction name",
+      "description": "Detailed explanation of this specific restriction"
+    }
+  ],
+  "ffl_action": "What the FFL should specifically do in this situation",
+  "sources": ["Source citation 1", "Source citation 2"]
+}
+
+Verdict definitions:
+- CLEAR: No restrictions beyond standard federal requirements
+- RESTRICTED: Transfer may be possible but additional steps required (permits, waiting periods, etc.)
+- BLOCKED: Transfer cannot be completed by an out-of-state FFL under current law
+- VERIFY: Situation is complex or laws are in flux — FFL must verify before proceeding
+
+Be accurate and current. If a law has recently changed, note that."""
+
+
+@app.route("/transfer-check", methods=["POST", "OPTIONS"])
+def transfer_check():
+    """Real-time state transfer restriction lookup using AI + web search."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    profile = get_profile(user["id"])
+    if not profile or profile.get("subscription_status") != "active":
+        return jsonify({"error": "Subscription not active"}), 403
+
+    body = request.get_json()
+    buyer_state = body.get("buyer_state", "").strip()
+    firearm_type = body.get("firearm_type", "").strip()
+
+    if not buyer_state or not firearm_type:
+        return jsonify({"error": "buyer_state and firearm_type are required"}), 400
+
+    api_key = get_api_key(user["id"])
+    if not api_key:
+        return jsonify({"error": "No API key saved. Go to Settings to add your Anthropic API key."}), 400
+
+    ffl_state = profile.get("state", "unknown state")
+    user_query = (
+        f"I am an FFL dealer located in {ffl_state}. "
+        f"A buyer whose state of residence is {buyer_state} wants to purchase a {firearm_type} from my store. "
+        f"What are the current state-specific restrictions or requirements I need to be aware of for this transfer? "
+        f"Please search for the most current {buyer_state} firearm transfer laws."
+    )
+
+    try:
+        import anthropic as anthropic_sdk
+        client = anthropic_sdk.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=TRANSFER_CHECK_PROMPT,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": user_query}]
+        )
+
+        # Extract text from response — may be after tool use blocks
+        result_text = ""
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "text":
+                result_text += block.text
+
+        if not result_text:
+            return jsonify({"error": "No response received from AI."}), 500
+
+        # Clean and parse JSON
+        clean = result_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("```")[1]
+            if clean.startswith("json"):
+                clean = clean[4:]
+        clean = clean.strip()
+
+        try:
+            result = json.loads(clean)
+        except Exception:
+            # Fallback: return raw as summary
+            result = {
+                "verdict": "VERIFY",
+                "summary": result_text[:500],
+                "restrictions": [],
+                "ffl_action": "Review the information above and consult with a compliance attorney.",
+                "sources": []
+            }
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": f"Lookup failed: {str(e)}"}), 500
 
 
 @app.route("/admin/maintenance", methods=["GET", "POST", "OPTIONS"])
