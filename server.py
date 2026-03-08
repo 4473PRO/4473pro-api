@@ -622,6 +622,40 @@ def save_api_key():
     return jsonify({"success": True})
 
 
+@app.route("/cancel-subscription", methods=["POST", "OPTIONS"])
+def cancel_subscription():
+    """Cancel the user's Stripe subscription at period end."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    # Get stripe subscription ID from profile
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}&select=stripe_subscription_id",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    profiles = r.json()
+    if not profiles or not profiles[0].get("stripe_subscription_id"):
+        return jsonify({"error": "No active subscription found"}), 404
+
+    sub_id = profiles[0]["stripe_subscription_id"]
+
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        # Cancel at period end — they keep access until the billing period runs out
+        stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+        return jsonify({"success": True, "message": "Your subscription has been cancelled. You will retain full access until the end of your current billing period."})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8247))
     app.run(host="0.0.0.0", port=port)
