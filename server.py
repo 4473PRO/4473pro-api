@@ -867,7 +867,7 @@ STATE_NAME_TO_CODE = {
     "West Virginia":"WV","Wisconsin":"WI","Wyoming":"WY"
 }
 
-FIREARM_TYPES_FOR_CACHE = ["handgun", "long_gun", "any_firearm", "nfa_item"]
+FIREARM_TYPES_FOR_CACHE = ["long_gun"]
 
 def verify_admin(request):
     """Check admin secret from header."""
