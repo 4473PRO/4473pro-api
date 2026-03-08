@@ -1234,21 +1234,34 @@ def transfer_check():
     )
 
     try:
-        import anthropic as anthropic_sdk
-        client = anthropic_sdk.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=2048,
-            system=TRANSFER_CHECK_PROMPT,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": user_query}]
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "interleaved-thinking-2025-05-14",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 2048,
+                "system": TRANSFER_CHECK_PROMPT,
+                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                "messages": [{"role": "user", "content": user_query}]
+            },
+            timeout=90
         )
 
-        # Extract text from response — may be after tool use blocks
+        if response.status_code != 200:
+            return jsonify({"error": f"AI API error: {response.status_code}"}), 500
+
+        data = response.json()
+
+        # Extract text blocks — skip tool_use and tool_result blocks
         result_text = ""
-        for block in response.content:
-            if hasattr(block, "type") and block.type == "text":
-                result_text += block.text
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                result_text += block.get("text", "")
 
         if not result_text:
             return jsonify({"error": "No response received from AI."}), 500
@@ -1264,7 +1277,6 @@ def transfer_check():
         try:
             result = json.loads(clean)
         except Exception:
-            # Fallback: return raw as summary
             result = {
                 "verdict": "VERIFY",
                 "summary": result_text[:500],
