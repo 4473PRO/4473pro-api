@@ -344,16 +344,18 @@ def health():
 def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=None):
     prompt = SYSTEM_PROMPT
     if ccw_exempt and ccw_permit_name:
-        prompt += f"""
-
-STATE-SPECIFIC RULE — CCW NICS EXEMPTION: This FFL's state allows firearm transfers without a NICS background check when the buyer presents a valid concealed carry permit. The permit name in this state is: {ccw_permit_name}.
-If the buyer has presented a valid {ccw_permit_name} as their ID or supporting document, Section C NICS fields are NOT required — treat them as N/A and do not flag them as missing.
-Do NOT flag a missing NICS check when a valid {ccw_permit_name} is documented on the form.
-IMPORTANT: The permit must have been issued within the last 5 years to qualify as a NICS alternative."""
+        ccw_rule = (
+            "\n\nSTATE-SPECIFIC RULE - CCW NICS EXEMPTION: This FFL's state allows firearm transfers "
+            "without a NICS background check when the buyer presents a valid concealed carry permit. "
+            "The permit name in this state is: " + ccw_permit_name + ". "
+            "If the buyer has presented a valid " + ccw_permit_name + " as their ID or supporting document, "
+            "Section C NICS fields are NOT required - treat them as N/A and do not flag them as missing. "
+            "Do NOT flag a missing NICS check when a valid " + ccw_permit_name + " is documented on the form. "
+            "IMPORTANT: The permit must have been issued within the last 5 years to qualify as a NICS alternative."
+        )
+        prompt += ccw_rule
     if business_name:
-        prompt += f"
-
-FFL BUSINESS: This audit is being run for {business_name}."
+        prompt += "\n\nFFL BUSINESS: This audit is being run for " + business_name + "."
     return prompt
 
 
