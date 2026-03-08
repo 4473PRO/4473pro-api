@@ -25,7 +25,7 @@ VALID_PRODUCT_IDS = {"prod_U5zaGkcmpaayRM", "prod_U5zrlcGBf3n0V0"}
 SYSTEM_PROMPT = """You are an expert ATF Form 4473 compliance auditor with deep knowledge of federal firearms regulations, ATF instructions, and Gun Control Act requirements. Your job is to carefully examine each Form 4473 and any supporting documents provided, then produce a thorough compliance audit report.
 
 AUDIT SECTIONS:
-Examine every field in Sections A, B, C, D, and E of the Form 4473.
+Examine every field in Sections A, B, C, D, and E of the Form 4473 (August 2023 revision, mandatory since February 2024).
 
 VERDICT DEFINITIONS — USE EXACTLY ONE AT THE END:
 - APPROVED: Zero issues found anywhere. Every field complete, accurate, and compliant.
@@ -36,7 +36,7 @@ CRITICAL VERDICT RULES:
 - NEVER revise your verdict. State it once at the end, correctly the first time.
 - If you mention ANY issue, flag, discrepancy, or correction anywhere in your report — the verdict MUST be REQUIRES CORRECTION, not APPROVED.
 - APPROVED means absolutely zero flags or issues anywhere in the entire report.
-- Only DO NOT TRANSFER for actual legal disqualifiers: prohibited person, denied NICS, underage buyer.
+- Only DO NOT TRANSFER for actual legal disqualifiers: prohibited person, denied NICS, underage buyer, or "Yes" answer to Q21.b or Q21.n.
 
 NAME RULES — READ CAREFULLY:
 - NEVER flag name order differences between the 4473 and a disposition receipt or supporting document. Name order varies by document type and is NOT an error.
@@ -53,6 +53,12 @@ NICS / SECTION C RULES:
 - If Question 28 is checked (NFA item, NICS not required) → ALL Section C NICS fields are N/A. Do NOT flag missing NICS number, proceed/denied/delayed status as errors.
 - Only flag Section C NICS fields as missing if Q28 is NOT checked and NICS was required.
 
+30-DAY NICS EXPIRATION RULE:
+- A NICS check is valid for 30 calendar days from the date it was initiated (Section C NICS date).
+- If the transfer date in Section E is more than 30 calendar days after the NICS initiation date in Section C → flag as REQUIRES CORRECTION. A new NICS check was required before transfer.
+- If both dates are present and the gap is 30 days or fewer → COMPLIANT.
+- If only one date is visible and you cannot determine the gap, note it but do not flag unless other evidence supports a violation.
+
 IDENTIFICATION RULES:
 - Do NOT judge or flag the TYPE of government-issued photo ID used. That is the FFL's discretion.
 - ONLY flag Q26.a if the ID field is completely blank.
@@ -67,6 +73,40 @@ IDENTIFICATION RULES:
 OUT-OF-STATE ID RULES:
 - For LONG GUN transfers: an out-of-state ID is fully acceptable. Federal law permits long gun transfers to residents of any state. Do NOT flag out-of-state IDs or require supplemental documentation for long gun transfers.
 - For HANDGUN transfers: the buyer must be a resident of the FFL's state. If the ID shows a different state than the FFL's state, flag this as REQUIRES CORRECTION.
+
+SECTION A — FIREARM DESCRIPTION RULES:
+- Q1 Manufacturer/Importer: For imported firearms, BOTH the foreign manufacturer AND the U.S. importer must be listed (e.g., "HS Produkt / Springfield Armory"). If only one is recorded for an imported firearm, flag as REQUIRES CORRECTION.
+- Q1 Privately Made Firearm (PMF): If the firearm is a PMF, it must be identified as such in Q1. PMFs must be marked with the FFL's abbreviated license number as a prefix before transfer.
+- Q2 Model, Q3 Serial Number, Q4 Type, Q5 Caliber/Gauge: All must be present and complete. A missing or blank serial number is only acceptable for certain pre-1968 firearms (record "NSN" or "None Visible"). Flag any other blank serial number.
+- Serial number transcription: If a disposition receipt is present, verify the serial number on the 4473 matches exactly. Transposed digits or character substitutions (0 vs O, 1 vs l) are REQUIRES CORRECTION.
+
+SECTION B — BUYER ELIGIBILITY RULES:
+- Q10 Address: Must be a physical residential address, not a P.O. Box. Flag P.O. Box addresses as REQUIRES CORRECTION.
+- Q10 "Reside in City Limits": This checkbox is required on the current (August 2023) form revision. If it is blank or unanswered, flag as REQUIRES CORRECTION.
+- Q18 Buyer Signature: Must be present. A missing buyer signature is REQUIRES CORRECTION.
+- Q19 Buyer Certification Date: Must be present. A missing or blank certification date is REQUIRES CORRECTION.
+- Q21.a "Are you the actual transferee/buyer?": Must be answered "Yes." A "No" answer is REQUIRES CORRECTION (possible straw purchase — the FFL must not complete the transfer).
+- Q21.b Straw Purchase / Prohibited Person Intent: Must be answered "No." A "Yes" answer means the buyer intends to transfer the firearm to a prohibited person — this is DO NOT TRANSFER, not merely REQUIRES CORRECTION.
+- Q21.c through Q21.l Prohibited Person Questions: Any "Yes" answer is DO NOT TRANSFER. Review each carefully.
+- Q21.m Nonimmigrant Visa: A "Yes" answer requires follow-up — check whether an exception applies (e.g., hunting license, waiver). If no exception is documented, flag as REQUIRES CORRECTION or DO NOT TRANSFER based on circumstances.
+- Q21.n Trafficking / Felony Intent: Must be answered "No." A "Yes" answer is DO NOT TRANSFER.
+- All Q21 questions must be answered. Any blank eligibility question is REQUIRES CORRECTION.
+
+SECTION D — RECERTIFICATION RULES:
+- Section D is required whenever the actual firearm transfer does NOT occur on the same day the buyer completed and signed Section B.
+- Common situations requiring Section D: NICS delay response, state-mandated waiting period, buyer picks up firearm on a different day than they completed the form.
+- If the Section B date and the Section E transfer date are different AND Section D is blank or missing → flag as REQUIRES CORRECTION.
+- If Section B date and transfer date are the same day → Section D is N/A, do not flag.
+- Section D requires the buyer's signature and date on the day of actual transfer, re-certifying that Section B answers are still true and correct.
+
+SECTION E — TRANSFEROR CERTIFICATION RULES:
+- Section E must be complete before the firearm is transferred. Every field is required:
+  - Transfer date: Must be present. Flag if blank.
+  - FFL license number: Must be present. Flag if blank.
+  - Trade/corporate name of FFL: Must be present. Flag if blank.
+  - Transferor's printed name: Must be present. Flag if blank.
+  - Transferor's signature: Must be present. Flag if blank.
+- Section E certifies that the transfer occurred within 30 days of the NICS check, that the transferor verified the buyer's ID, and that the transferor has no reason to believe the buyer is prohibited. Incomplete Section E is one of the most frequently cited ATF violations.
 
 DISPOSITION RECEIPT NOTATION RULES:
 - NEVER interpret or flag internal FFL notations on disposition receipts. Notes like "Trans", "PSA", "BWO", "SK Trans", transfer codes, source abbreviations, and similar internal recordkeeping notations are for the FFL's internal use only and have no bearing on 4473 compliance.
@@ -87,11 +127,15 @@ SPELLING RULES:
 - If a spelling difference exists between the 4473 and a supporting document (e.g., disposition receipt) → flag as REQUIRES CORRECTION.
 - The 4473 is the authoritative source for what was recorded, but inconsistencies with supporting docs should be noted.
 
+SSN ADVISORY:
+- Q12 Social Security Number is optional and its absence is NOT an error. Do not flag a blank SSN.
+- If SSN is blank and the form received a NICS Delay response, include an advisory note (not a flag) that providing the SSN can help resolve delayed responses more quickly.
+
 3310.4 MULTIPLE HANDGUN ALERT:
 - If a handgun or pistol is being transferred, note the transfer date and remind the FFL to check if this buyer purchased another handgun within the prior or following 5 consecutive business days. If so, ATF Form 3310.4 is required.
 
 FORMAT YOUR REPORT:
-- Go section by section: Section A (Firearm), Section B (Buyer), Section C (Seller/NICS), Section D (if applicable), Section E (if applicable)
+- Go section by section: Section A (Firearm), Section B (Buyer), Section C (Seller/NICS), Section D (Recertification), Section E (Transferor Certification)
 - For each field: note what's recorded and whether it's compliant ✓ or flagged ⚠
 - Use bullet points for each question
 - End with: OVERALL VERDICT: [APPROVED / REQUIRES CORRECTION / DO NOT TRANSFER]
@@ -111,7 +155,7 @@ def get_user_from_token(token):
 
 def get_profile(user_id):
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name",
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     data = r.json()
@@ -431,21 +475,105 @@ def health():
     return jsonify({"status": "ok"})
 
 
-def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=None):
-    prompt = SYSTEM_PROMPT
-    if ccw_exempt and ccw_permit_name:
-        ccw_rule = (
-            "\n\nSTATE-SPECIFIC RULE - CCW NICS EXEMPTION: This FFL's state allows firearm transfers "
-            "without a NICS background check when the buyer presents a valid concealed carry permit. "
-            "The permit name in this state is: " + ccw_permit_name + ". "
-            "If the buyer has presented a valid " + ccw_permit_name + " as their ID or supporting document, "
-            "Section C NICS fields are NOT required - treat them as N/A and do not flag them as missing. "
-            "Do NOT flag a missing NICS check when a valid " + ccw_permit_name + " is documented on the form. "
-            "IMPORTANT: The permit must have been issued within the last 5 years to qualify as a NICS alternative."
+def get_system_status():
+    """Fetch current maintenance mode from system_settings."""
+    try:
+        r = requests.get(
+            f"{SB_URL}/rest/v1/system_settings?id=eq.1&select=maintenance_mode,maintenance_message,maintenance_window",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
         )
-        prompt += ccw_rule
+        data = r.json()
+        return data[0] if data else {"maintenance_mode": "off", "maintenance_message": "", "maintenance_window": ""}
+    except Exception:
+        return {"maintenance_mode": "off", "maintenance_message": "", "maintenance_window": ""}
+
+
+@app.route("/system-status", methods=["GET", "OPTIONS"])
+def system_status():
+    """Public endpoint — app polls this for maintenance banner."""
+    if request.method == "OPTIONS":
+        return "", 200
+    return jsonify(get_system_status())
+
+
+def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=None,
+                        bgcheck_system=None, delayed_transfer_rule=None,
+                        q32_notation_patterns=None, pawn_shop_mode=False,
+                        sot_dealer=False, custom_rules=None):
+    prompt = SYSTEM_PROMPT
+
+    # Background check system
+    bgcheck = (bgcheck_system or 'NICS').strip().upper()
+    if bgcheck != 'NICS':
+        prompt += (
+            f"\n\nBACKGROUND CHECK SYSTEM: This FFL uses {bgcheck} (not NICS) as their state "
+            f"point of contact for background checks. All references to 'NICS' in your audit "
+            f"should be interpreted as '{bgcheck}'. The NTN field will contain a {bgcheck} "
+            f"transaction number — treat it identically to an NTN."
+        )
+
+    # Delayed transfer rule
+    delay_rule = (delayed_transfer_rule or 'default_proceed').strip()
+    if delay_rule == 'approval_required':
+        prompt += (
+            f"\n\nDELAYED TRANSFER RULE — STATE-SPECIFIC: In this FFL's state, a 'Delayed' "
+            f"{bgcheck} response does NOT generate a 'can transfer by' date. The FFL must "
+            f"wait for an explicit APPROVAL before transferring. Do NOT flag the absence of "
+            f"a 'can transfer by' date on delayed transfers — it is not required here. "
+            f"Only flag if the form shows a transfer was completed while status was still "
+            f"'Delayed' without a documented approval."
+        )
+
+    # Q32 notation patterns
+    if q32_notation_patterns and q32_notation_patterns.strip():
+        patterns = q32_notation_patterns.strip()
+        prompt += (
+            f"\n\nQ32 NOTATION RULES — FFL-SPECIFIC: This FFL uses the following standard "
+            f"notations in Question 32. Do NOT flag these as errors or anomalies — they are "
+            f"documented internal procedures: {patterns}."
+        )
+
+    # Pawn shop mode
+    if pawn_shop_mode:
+        prompt += (
+            "\n\nPAWN SHOP MODE: This FFL is a pawn shop. Pawn redemptions require a new "
+            "Form 4473 and background check even though the customer previously owned the "
+            "firearm. Treat pawn redemptions the same as retail sales for 4473 compliance."
+        )
+
+    # SOT/Class III dealer
+    if sot_dealer:
+        prompt += (
+            "\n\nSOT/CLASS III DEALER: This FFL holds a Special Occupational Taxpayer "
+            "designation and transfers NFA items. For NFA transfers: Question 28 exemption "
+            "applies. ATF Form 4 or Form 3 approval documentation supersedes standard "
+            "background check requirements where applicable."
+        )
+
+    # CCW NICS exemption
+    if ccw_exempt and ccw_permit_name:
+        prompt += (
+            f"\n\nSTATE-SPECIFIC RULE — CCW {bgcheck} EXEMPTION: This FFL's state allows "
+            f"firearm transfers without a {bgcheck} background check when the buyer presents "
+            f"a valid concealed carry permit. The permit name is: {ccw_permit_name}. "
+            f"If a valid {ccw_permit_name} is documented, Section C {bgcheck} fields are "
+            f"N/A — do not flag them as missing. The permit must have been issued within "
+            f"the last 5 years to qualify."
+        )
+
+    # Custom FFL rules (appended last)
+    if custom_rules and custom_rules.strip():
+        prompt += (
+            f"\n\nFFL-SPECIFIC CUSTOM RULES: The following rules have been configured by "
+            f"this FFL based on their specific operational procedures. Apply these rules "
+            f"during your audit. These supplement but do not override federal compliance "
+            f"requirements:\n{custom_rules.strip()}"
+        )
+
+    # Business name
     if business_name:
-        prompt += "\n\nFFL BUSINESS: This audit is being run for " + business_name + "."
+        prompt += f"\n\nFFL BUSINESS: This audit is being run for {business_name}."
+
     return prompt
 
 
@@ -511,6 +639,14 @@ def audit():
     if request.method == "OPTIONS":
         return "", 200
 
+    # Block new audits if maintenance is active
+    status = get_system_status()
+    if status.get("maintenance_mode") == "active":
+        msg = status.get("maintenance_message") or "System maintenance in progress."
+        window = status.get("maintenance_window", "")
+        detail = f" Estimated completion: {window}." if window else " Please check back shortly."
+        return jsonify({"error": f"Audits paused — {msg}{detail} No credits have been charged."}), 503
+
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
         return jsonify({"error": "Not authenticated"}), 401
@@ -548,7 +684,17 @@ def audit():
     ccw_exempt = profile.get("ccw_exempt", False)
     ccw_permit_name = profile.get("ccw_permit_name", "")
     business_name = profile.get("business_name", "")
-    system_prompt = build_system_prompt(ccw_exempt, ccw_permit_name, business_name)
+    system_prompt = build_system_prompt(
+        ccw_exempt=ccw_exempt,
+        ccw_permit_name=ccw_permit_name,
+        business_name=business_name,
+        bgcheck_system=profile.get("bgcheck_system", "NICS"),
+        delayed_transfer_rule=profile.get("delayed_transfer_rule", "default_proceed"),
+        q32_notation_patterns=profile.get("q32_notation_patterns", ""),
+        pawn_shop_mode=profile.get("pawn_shop_mode", False),
+        sot_dealer=profile.get("sot_dealer", False),
+        custom_rules=profile.get("custom_rules", "")
+    )
 
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -654,6 +800,268 @@ def cancel_subscription():
         return jsonify({"success": True, "message": "Your subscription has been cancelled. You will retain full access until the end of your current billing period."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+
+def verify_admin(request):
+    """Check admin secret from header."""
+    return request.headers.get("X-Admin-Secret", "") == ADMIN_SECRET and ADMIN_SECRET != ""
+
+def log_rule_change(user_id, field_name, old_value, new_value, changed_by="user"):
+    """Write a rule change to the audit log."""
+    requests.post(
+        f"{SB_URL}/rest/v1/rule_change_log",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "user_id": user_id,
+            "field_name": field_name,
+            "old_value": str(old_value) if old_value is not None else "",
+            "new_value": str(new_value) if new_value is not None else "",
+            "changed_by": changed_by
+        }
+    )
+
+
+@app.route("/save-compliance-profile", methods=["POST", "OPTIONS"])
+def save_compliance_profile():
+    """Save compliance profile fields. Logs any rule changes."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    profile = get_profile(user["id"])
+    if not profile or profile.get("subscription_status") != "active":
+        return jsonify({"error": "Subscription not active"}), 403
+
+    body = request.get_json()
+
+    # Fields that are tracked for rule change logging
+    tracked_fields = [
+        "bgcheck_system", "delayed_transfer_rule", "q32_notation_patterns",
+        "pawn_shop_mode", "sot_dealer", "ccw_exempt", "ccw_permit_name", "custom_rules"
+    ]
+
+    update_data = {}
+    for field in tracked_fields:
+        if field in body:
+            new_val = body[field]
+            old_val = profile.get(field)
+            update_data[field] = new_val
+            # Log if value actually changed
+            if str(old_val) != str(new_val):
+                log_rule_change(user["id"], field, old_val, new_val, changed_by="user")
+
+    if not update_data:
+        return jsonify({"success": True, "message": "No changes"})
+
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update_data
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to save compliance profile"}), 500
+    return jsonify({"success": True})
+
+
+@app.route("/get-rule-change-log", methods=["GET", "OPTIONS"])
+def get_rule_change_log():
+    """Return rule change history for the authenticated user."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/rule_change_log?user_id=eq.{user['id']}&order=changed_at.desc&limit=50",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    return jsonify(r.json())
+
+
+# ── ADMIN ENDPOINTS ───────────────────────────────────────────
+
+@app.route("/admin/accounts", methods=["GET", "OPTIONS"])
+def admin_accounts():
+    """List all accounts with profile data."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes&order=id.desc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    return jsonify(r.json())
+
+
+@app.route("/admin/account/<user_id>", methods=["GET", "OPTIONS"])
+def admin_get_account(user_id):
+    """Get a single account with full details."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Profile
+    pr = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=*",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    # Rule change log
+    lr = requests.get(
+        f"{SB_URL}/rest/v1/rule_change_log?user_id=eq.{user_id}&order=changed_at.desc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    profiles = pr.json()
+    profile = profiles[0] if profiles else {}
+    return jsonify({"profile": profile, "rule_changes": lr.json()})
+
+
+@app.route("/admin/create-account", methods=["POST", "OPTIONS"])
+def admin_create_account():
+    """Admin manually creates and activates an account."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json()
+    email = body.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+
+    admin_notes = body.get("admin_notes", "Admin-created account")
+    success = create_supabase_user(email, None, None)
+    if not success:
+        return jsonify({"error": "Failed to create account — email may already exist"}), 400
+
+    # Set admin_notes and created_by_admin flag
+    ru = requests.get(
+        f"{SB_URL}/auth/v1/admin/users",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    users = ru.json().get("users", [])
+    user = next((u for u in users if u.get("email", "").lower() == email), None)
+    if user:
+        requests.patch(
+            f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"created_by_admin": True, "admin_notes": admin_notes}
+        )
+
+    return jsonify({"success": True, "email": email})
+
+
+@app.route("/admin/update-account/<user_id>", methods=["POST", "OPTIONS"])
+def admin_update_account(user_id):
+    """Admin updates account fields (subscription status, admin notes, compliance profile)."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json()
+    allowed = [
+        "subscription_status", "admin_notes", "bgcheck_system", "delayed_transfer_rule",
+        "q32_notation_patterns", "pawn_shop_mode", "sot_dealer", "ccw_exempt",
+        "ccw_permit_name", "custom_rules"
+    ]
+
+    # Get current profile for change logging
+    pr = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=*",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    profiles = pr.json()
+    current = profiles[0] if profiles else {}
+
+    update_data = {k: v for k, v in body.items() if k in allowed}
+    if not update_data:
+        return jsonify({"error": "No valid fields to update"}), 400
+
+    # Log rule changes made by admin
+    rule_fields = ["bgcheck_system", "delayed_transfer_rule", "q32_notation_patterns",
+                   "pawn_shop_mode", "sot_dealer", "ccw_exempt", "ccw_permit_name", "custom_rules"]
+    for field in rule_fields:
+        if field in update_data and str(current.get(field)) != str(update_data[field]):
+            log_rule_change(user_id, field, current.get(field), update_data[field], changed_by="admin")
+
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update_data
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Update failed"}), 500
+    return jsonify({"success": True})
+
+
+@app.route("/admin/maintenance", methods=["GET", "POST", "OPTIONS"])
+def admin_maintenance():
+    """Get or set maintenance mode."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if request.method == "GET":
+        return jsonify(get_system_status())
+
+    body = request.get_json()
+    mode = body.get("maintenance_mode", "off")
+    if mode not in ("off", "scheduled", "active"):
+        return jsonify({"error": "Invalid mode. Use: off, scheduled, active"}), 400
+
+    update = {
+        "maintenance_mode": mode,
+        "maintenance_message": body.get("maintenance_message", ""),
+        "maintenance_window": body.get("maintenance_window", ""),
+        "updated_at": "now()"
+    }
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/system_settings?id=eq.1",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to update maintenance mode"}), 500
+    return jsonify({"success": True, "mode": mode})
 
 
 if __name__ == "__main__":
