@@ -70,9 +70,19 @@ IDENTIFICATION RULES:
   - NEVER invent hypothetical address mismatches. If there is no concrete evidence of a problem, mark it compliant.
   - Tennessee Carry Permits display the holder's address and are valid for establishing residence. Treat them the same as a driver's license for Q26b purposes.
 
+MILITARY BUYER RULES (ATF Form 4473 August 2023 Revision, ATF Ruling 2001-5, 18 U.S.C. 921(b)):
+- Under the August 2023 revision of Form 4473, Q10 requires only the buyer's actual residential address. Active-duty service members list their off-post residential address in Q10. Do NOT flag Q10 for failing to also list a duty station address — that requirement no longer exists on the current form revision.
+- Q26c is where the duty station and PCS orders are documented. If Q26c is populated with the duty station (base name, city, state) and PCS orders are present, the military documentation is complete.
+- OUT-OF-STATE HANDGUN — MILITARY EXCEPTION: If the Q10 state differs from the FFL's state for a handgun transfer, do NOT automatically flag as a cross-state residency violation. First check:
+  1. Is Q26c populated with a duty station? If yes, this is likely an active-duty military transfer.
+  2. Is the buyer's ID consistent with either the duty station state OR the Q10 residence state? If yes → document as a compliant military transfer. Do NOT flag as cross-state residency issue.
+  3. If Q10 state differs from FFL state AND Q26c is blank AND no military documentation is present → flag as cross-state residency issue requiring correction.
+- FORT CAMPBELL SPECIAL CASE: Fort Campbell is unique — the installation physically straddles the Kentucky/Tennessee state line. Soldiers assigned to Fort Campbell are legal residents of BOTH states and may purchase handguns from FFLs in either KY or TN. If Q26c references Fort Campbell (any variation: "Fort Campbell", "Ft. Campbell", "Ft Campbell", KY 42223 or TN zip codes on-post) → the transfer is compliant regardless of whether the FFL is in KY or TN and regardless of whether the buyer's Q10 address is in KY or TN.
+- Other duty stations near state lines (e.g., Fort Eisenhower/Georgia, Fort Novosel/Alabama) follow the general military exception above but do NOT have Fort Campbell's unique dual-state legal residency status.
+
 OUT-OF-STATE ID RULES:
 - For LONG GUN transfers: an out-of-state ID is fully acceptable. Federal law permits long gun transfers to residents of any state. Do NOT flag out-of-state IDs or require supplemental documentation for long gun transfers.
-- For HANDGUN transfers: the buyer must be a resident of the FFL's state. If the ID shows a different state than the FFL's state, flag this as REQUIRES CORRECTION.
+- For HANDGUN transfers: the buyer must be a resident of the FFL's state. If the ID shows a different state than the FFL's state, apply the MILITARY BUYER RULES above before flagging. If no military exception applies, flag as REQUIRES CORRECTION.
 
 SECTION A — FIREARM DESCRIPTION RULES:
 - Q1 Manufacturer/Importer: For imported firearms, BOTH the foreign manufacturer AND the U.S. importer must be listed (e.g., "HS Produkt / Springfield Armory"). If only one is recorded for an imported firearm, flag as REQUIRES CORRECTION.
@@ -112,6 +122,14 @@ DISPOSITION RECEIPT NOTATION RULES:
 - NEVER interpret or flag internal FFL notations on disposition receipts. Notes like "Trans", "PSA", "BWO", "SK Trans", transfer codes, source abbreviations, and similar internal recordkeeping notations are for the FFL's internal use only and have no bearing on 4473 compliance.
 - Q8 (Private Party Transfer) should only be evaluated based on what is on the 4473 itself, never based on disposition receipt notations.
 
+MULTI-COPY FORM RULES (ATF Ruling 2022-1):
+- If two copies of the same 4473 are present in the submission, treat them as follows:
+  - FIRST COPY = the original form. Audit it normally. Any missing or incorrect fields on the original are real errors and must be flagged.
+  - SECOND COPY = the corrected copy per ATF Ruling 2022-1. Under this ruling, corrections to a 4473 are made on a copy of the original; the corrected copy is electronically attached to and retained with the original as the permanent record.
+  - Do NOT treat the first copy as a "preliminary" or "draft" form and give it a pass. The first copy is the original and its errors count.
+  - The corrected copy (second copy) should be evaluated for whether the corrections address the original errors. If the corrected copy is complete and compliant, note it as compliant per ATF Ruling 2022-1.
+  - The overall verdict should reflect: original had flagged error(s); corrected copy is compliant per ATF Ruling 2022-1 — if the correction resolves the issue, the verdict may be APPROVED if no other open issues remain.
+
 CORRECTION RULES:
 - If a field contains a visible correction (crossed out and initialed, correction photocopy attached, or correction log noted) → mark as COMPLIANT with a brief note that the correction is documented. Do NOT use a corrected field to sustain a REQUIRES CORRECTION verdict.
 - A corrected error is not an open error.
@@ -130,6 +148,13 @@ SPELLING RULES:
 SSN ADVISORY:
 - Q12 Social Security Number is optional and its absence is NOT an error. Do not flag a blank SSN.
 - If SSN is blank and the form received a NICS Delay response, include an advisory note (not a flag) that providing the SSN can help resolve delayed responses more quickly.
+
+TENNESSEE TICS "G" DESIGNATOR RULE:
+- In Tennessee, the TICS (Tennessee Instant Check System) uses a "G" prefix on transaction numbers (e.g., 26G013952) to designate a stolen gun check — a firearm-only check, NOT a buyer background check.
+- A "G" receipt is generated when a firearm is added to a 4473 after the background check has already been initiated or returned. The FFL runs a separate stolen gun check on the added firearm; TICS assigns it a "G" transaction number.
+- The "G" receipt is purely supplemental documentation kept with the form. It is NEVER recorded in Q27.b. Q27.b contains only the buyer background check transaction number (e.g., a "W" series number like 26W091642).
+- NEVER compare a "G" receipt number against Q27.b. They are completely different transactions. A mismatch between a "G" number and a "W" number is NOT a discrepancy — it is expected and correct.
+- When a "G" receipt is present in submitted documents, note it as expected supplemental documentation for an added firearm. Do not flag it as a discrepancy or require investigation.
 
 3310.4 MULTIPLE HANDGUN ALERT:
 - If a handgun or pistol is being transferred, note the transfer date and remind the FFL to check if this buyer purchased another handgun within the prior or following 5 consecutive business days. If so, ATF Form 3310.4 is required.
@@ -1644,65 +1669,6 @@ def admin_maintenance():
     if r.status_code not in [200, 204]:
         return jsonify({"error": "Failed to update maintenance mode"}), 500
     return jsonify({"success": True, "mode": mode})
-
-
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-
-@app.route("/support", methods=["POST", "OPTIONS"])
-def support():
-    if request.method == "OPTIONS":
-        return "", 204
-    try:
-        data = request.get_json(force=True)
-        name          = (data.get("name") or "").strip()
-        email         = (data.get("email") or "").strip()
-        account_email = (data.get("account_email") or "").strip()
-        subject       = (data.get("subject") or "").strip()
-        message       = (data.get("message") or "").strip()
-
-        if not name or not email or not subject or not message:
-            return jsonify({"error": "Missing required fields"}), 400
-
-        account_line = f"<tr><td style='padding:6px 0;color:#888;'>Account Email</td><td style='padding:6px 0;'>{account_email or '(same as above)'}</td></tr>"
-
-        html_body = f"""
-        <div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#1c1a17;color:#e0d8cc;padding:32px;border-radius:6px;border-top:3px solid #D4A843;">
-          <div style="font-family:monospace;font-size:1.3rem;color:#D4A843;letter-spacing:2px;margin-bottom:24px;">4473 PRO — SUPPORT REQUEST</div>
-          <table style="width:100%;border-collapse:collapse;font-size:0.92rem;margin-bottom:24px;">
-            <tr><td style="padding:6px 0;color:#888;width:140px;">From</td><td style="padding:6px 0;">{name} &lt;{email}&gt;</td></tr>
-            {account_line}
-            <tr><td style="padding:6px 0;color:#888;">Topic</td><td style="padding:6px 0;">{subject}</td></tr>
-          </table>
-          <div style="background:#141210;border:1px solid rgba(255,255,255,0.08);border-radius:4px;padding:20px;font-size:0.92rem;line-height:1.7;white-space:pre-wrap;">{message}</div>
-          <div style="margin-top:24px;font-size:0.78rem;color:#555;">Reply directly to this email to respond to {name}.</div>
-        </div>
-        """
-
-        if not RESEND_API_KEY:
-            return jsonify({"error": "Email service not configured"}), 500
-
-        r = requests.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "from": "4473 Pro Support <support@4473pro.com>",
-                "to": ["info@4473pro.com"],
-                "reply_to": email,
-                "subject": f"[Support] {subject} — {name}",
-                "html": html_body
-            }
-        )
-
-        if r.status_code in [200, 201]:
-            return jsonify({"success": True})
-        else:
-            return jsonify({"error": "Failed to send email"}), 500
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
