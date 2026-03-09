@@ -180,7 +180,7 @@ def get_user_from_token(token):
 
 def get_profile(user_id):
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     data = r.json()
@@ -522,31 +522,21 @@ def system_status():
 
 
 def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=None,
-                        bgcheck_system=None, delayed_transfer_rule=None,
+                        delayed_transfer_rule=None,
                         q32_notation_patterns=None, pawn_shop_mode=False,
                         sot_dealer=False, custom_rules=None):
     prompt = SYSTEM_PROMPT
-
-    # Background check system
-    bgcheck = (bgcheck_system or 'NICS').strip().upper()
-    if bgcheck != 'NICS':
-        prompt += (
-            f"\n\nBACKGROUND CHECK SYSTEM: This FFL uses {bgcheck} (not NICS) as their state "
-            f"point of contact for background checks. All references to 'NICS' in your audit "
-            f"should be interpreted as '{bgcheck}'. The NTN field will contain a {bgcheck} "
-            f"transaction number — treat it identically to an NTN."
-        )
 
     # Delayed transfer rule
     delay_rule = (delayed_transfer_rule or 'default_proceed').strip()
     if delay_rule == 'approval_required':
         prompt += (
-            f"\n\nDELAYED TRANSFER RULE — STATE-SPECIFIC: In this FFL's state, a 'Delayed' "
-            f"{bgcheck} response does NOT generate a 'can transfer by' date. The FFL must "
-            f"wait for an explicit APPROVAL before transferring. Do NOT flag the absence of "
-            f"a 'can transfer by' date on delayed transfers — it is not required here. "
-            f"Only flag if the form shows a transfer was completed while status was still "
-            f"'Delayed' without a documented approval."
+            "\n\nDELAYED TRANSFER RULE — STATE-SPECIFIC: In this FFL's state, a 'Delayed' "
+            "NICS response does NOT generate a 'can transfer by' date. The FFL must "
+            "wait for an explicit APPROVAL before transferring. Do NOT flag the absence of "
+            "a 'can transfer by' date on delayed transfers — it is not required here. "
+            "Only flag if the form shows a transfer was completed while status was still "
+            "'Delayed' without a documented approval."
         )
 
     # Q32 notation patterns
@@ -578,10 +568,10 @@ def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=No
     # CCW NICS exemption
     if ccw_exempt and ccw_permit_name:
         prompt += (
-            f"\n\nSTATE-SPECIFIC RULE — CCW {bgcheck} EXEMPTION: This FFL's state allows "
-            f"firearm transfers without a {bgcheck} background check when the buyer presents "
+            f"\n\nSTATE-SPECIFIC RULE — CCW NICS EXEMPTION: This FFL's state allows "
+            f"firearm transfers without a NICS background check when the buyer presents "
             f"a valid concealed carry permit. The permit name is: {ccw_permit_name}. "
-            f"If a valid {ccw_permit_name} is documented, Section C {bgcheck} fields are "
+            f"If a valid {ccw_permit_name} is documented, Section C NICS fields are "
             f"N/A — do not flag them as missing. The permit must have been issued within "
             f"the last 5 years to qualify."
         )
@@ -713,7 +703,6 @@ def audit():
         ccw_exempt=ccw_exempt,
         ccw_permit_name=ccw_permit_name,
         business_name=business_name,
-        bgcheck_system=profile.get("bgcheck_system", "NICS"),
         delayed_transfer_rule=profile.get("delayed_transfer_rule", "default_proceed"),
         q32_notation_patterns=profile.get("q32_notation_patterns", ""),
         pawn_shop_mode=profile.get("pawn_shop_mode", False),
@@ -939,7 +928,7 @@ def save_compliance_profile():
 
     # Fields that are tracked for rule change logging
     tracked_fields = [
-        "bgcheck_system", "delayed_transfer_rule", "q32_notation_patterns",
+        "delayed_transfer_rule", "q32_notation_patterns",
         "pawn_shop_mode", "sot_dealer", "ccw_exempt", "ccw_permit_name", "custom_rules"
     ]
 
@@ -1002,7 +991,7 @@ def admin_accounts():
         return jsonify({"error": "Unauthorized"}), 401
 
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,bgcheck_system,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes&order=created_at.desc",
+        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes&order=created_at.desc",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     return jsonify(r.json())
@@ -1080,10 +1069,14 @@ def admin_update_account(user_id):
 
     body = request.get_json()
     allowed = [
-        "subscription_status", "admin_notes", "bgcheck_system", "delayed_transfer_rule",
+        "subscription_status", "admin_notes", "delayed_transfer_rule",
         "q32_notation_patterns", "pawn_shop_mode", "sot_dealer", "ccw_exempt",
-        "ccw_permit_name", "custom_rules"
+        "ccw_permit_name", "custom_rules", "business_name", "ffl_number", "phone", "state"
     ]
+
+    # Handle email change separately via Supabase Admin API
+    new_email = body.get("email", "").strip()
+    new_password = body.get("password", "").strip()
 
     # Get current profile for change logging
     pr = requests.get(
@@ -1094,27 +1087,51 @@ def admin_update_account(user_id):
     current = profiles[0] if profiles else {}
 
     update_data = {k: v for k, v in body.items() if k in allowed}
-    if not update_data:
-        return jsonify({"error": "No valid fields to update"}), 400
+
+    errors = []
+
+    # Update email via Supabase Admin API
+    if new_email:
+        er = requests.put(
+            f"{SB_URL}/auth/v1/admin/users/{user_id}",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}", "Content-Type": "application/json"},
+            json={"email": new_email}
+        )
+        if er.status_code not in [200, 204]:
+            errors.append(f"Email update failed: {er.text}")
+
+    # Update password via Supabase Admin API
+    if new_password:
+        pr2 = requests.put(
+            f"{SB_URL}/auth/v1/admin/users/{user_id}",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}", "Content-Type": "application/json"},
+            json={"password": new_password}
+        )
+        if pr2.status_code not in [200, 204]:
+            errors.append(f"Password update failed: {pr2.text}")
 
     # Log rule changes made by admin
-    rule_fields = ["bgcheck_system", "delayed_transfer_rule", "q32_notation_patterns",
+    rule_fields = ["delayed_transfer_rule", "q32_notation_patterns",
                    "pawn_shop_mode", "sot_dealer", "ccw_exempt", "ccw_permit_name", "custom_rules"]
     for field in rule_fields:
         if field in update_data and str(current.get(field)) != str(update_data[field]):
             log_rule_change(user_id, field, current.get(field), update_data[field], changed_by="admin")
 
-    r = requests.patch(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
-        headers={
-            "apikey": SB_SERVICE_KEY,
-            "Authorization": f"Bearer {SB_SERVICE_KEY}",
-            "Content-Type": "application/json"
-        },
-        json=update_data
-    )
-    if r.status_code not in [200, 204]:
-        return jsonify({"error": "Update failed"}), 500
+    if update_data:
+        r = requests.patch(
+            f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=update_data
+        )
+        if r.status_code not in [200, 204]:
+            errors.append("Profile update failed")
+
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 500
     return jsonify({"success": True})
 
 
@@ -1485,10 +1502,10 @@ def admin_cache_status():
 @app.route("/admin/refresh-cache", methods=["POST", "OPTIONS"])
 def admin_refresh_cache():
     """
-    Trigger a cache refresh for all 50 states × 4 firearm types.
+    Trigger a cache refresh for all 50 states × long_gun.
     Full refresh runs in a background thread and returns immediately.
     Single-entry refresh (state_code + firearm_type) runs synchronously.
-    Called nightly via cron-job.org. Protected by admin secret.
+    Protected by admin secret. Triggered manually from back office.
     """
     if request.method == "OPTIONS":
         return "", 200
@@ -1527,7 +1544,7 @@ def admin_refresh_cache():
                 result = run_transfer_check_ai(state_name, firearm_type)
                 upsert_cache_entry(state_code, firearm_type, result)
             except Exception:
-                pass  # Individual failures are silent — cron will retry nightly
+                pass  # Individual failures are silent — retry manually if needed
             if i < len(work) - 1:
                 time.sleep(3)
 
@@ -1535,7 +1552,7 @@ def admin_refresh_cache():
     thread.start()
 
     return jsonify({
-        "message": "Full cache refresh started in background. All 200 entries will be updated over the next 10–15 minutes. Click 'Reload Stats' to check progress.",
+        "message": "Full cache refresh started in background. All 50 entries will be updated over the next 3–5 minutes. Click 'Reload Stats' to check progress.",
         "results": {"success": 0, "failed": 0, "errors": []}
     })
 
