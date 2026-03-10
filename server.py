@@ -1557,6 +1557,35 @@ def admin_refresh_cache():
     })
 
 
+@app.route("/admin/clear-cache", methods=["POST", "OPTIONS"])
+def admin_clear_cache():
+    """
+    Delete all entries from transfer_check_cache.
+    Protected by admin secret. Used to force fresh lookups after a fix.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        r = requests.delete(
+            f"{SB_URL}/rest/v1/transfer_check_cache?state_code=neq.IMPOSSIBLE_PLACEHOLDER",
+            headers={
+                "apikey": SB_SERVICE_KEY,
+                "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                "Prefer": "return=minimal"
+            },
+            timeout=10
+        )
+        if r.status_code in (200, 204):
+            return jsonify({"message": "Cache cleared successfully. All future lookups will run fresh."})
+        else:
+            return jsonify({"error": f"Supabase returned {r.status_code}: {r.text[:200]}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/admin/cancel-subscription/<user_id>", methods=["POST", "OPTIONS"])
 def admin_cancel_subscription(user_id):
     """Admin: immediately cancel a user's Stripe subscription and mark account cancelled."""
