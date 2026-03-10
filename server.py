@@ -759,12 +759,19 @@ def audit():
         headers={
             "Content-Type": "application/json",
             "x-api-key": api_key,
-            "anthropic-version": "2023-06-01"
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "prompt-caching-2024-07-31"
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": "claude-haiku-4-5-20251001",
             "max_tokens": 4096,
-            "system": system_prompt,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ],
             "messages": [{
                 "role": "user",
                 "content": [
@@ -1002,7 +1009,7 @@ def admin_accounts():
         return jsonify({"error": "Unauthorized"}), 401
 
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,phone,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes,access_until&order=created_at.desc",
+        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes,access_until&order=created_at.desc",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     return jsonify(r.json())
@@ -1307,7 +1314,7 @@ def run_transfer_check_ai(buyer_state, firearm_type, ffl_state="the FFL's state"
             "content-type": "application/json"
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": "claude-haiku-4-5-20251001",
             "max_tokens": 4096,
             "system": TRANSFER_CHECK_PROMPT,
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
