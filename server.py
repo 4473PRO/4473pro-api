@@ -1002,7 +1002,7 @@ def admin_accounts():
         return jsonify({"error": "Unauthorized"}), 401
 
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes,access_until&order=created_at.desc",
+        f"{SB_URL}/rest/v1/profiles?select=id,email,subscription_status,business_name,state,ffl_number,phone,stripe_customer_id,stripe_subscription_id,created_by_admin,cancelled_at,created_at,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,ccw_exempt,ccw_permit_name,custom_rules,admin_notes,access_until&order=created_at.desc",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     return jsonify(r.json())
