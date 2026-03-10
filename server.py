@@ -187,27 +187,7 @@ def get_profile(user_id):
     return data[0] if data else None
 
 
-def get_api_key(user_id):
-    r = requests.get(
-        f"{SB_URL}/rest/v1/api_keys?user_id=eq.{user_id}&select=encrypted_key",
-        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
-    )
-    data = r.json()
-    if not data:
-        return None
-    encrypted = data[0]["encrypted_key"]
-    try:
-        parts = encrypted.split(":")
-        if len(parts) == 3:
-            iv = bytes.fromhex(parts[0])
-            tag = bytes.fromhex(parts[1])
-            ciphertext = bytes.fromhex(parts[2])
-            aesgcm = AESGCM(ENCRYPTION_KEY)
-            decrypted = aesgcm.decrypt(iv, ciphertext + tag, None)
-            return decrypted.decode("utf-8")
-        return encrypted
-    except Exception:
-        return encrypted
+# get_api_key removed — API key is now managed server-side via OWNER_ANTHROPIC_KEY
 
 
 def set_subscription_status(email, status, stripe_customer_id=None, stripe_subscription_id=None):
@@ -685,9 +665,9 @@ def audit():
         except Exception:
             pass
 
-    api_key = get_api_key(user["id"])
+    api_key = OWNER_ANTHROPIC_KEY
     if not api_key:
-        return jsonify({"error": "No API key saved. Go to Settings to add your Anthropic API key."}), 400
+        return jsonify({"error": "Server configuration error. Please contact support."}), 500
 
     body = request.get_json()
     file_name = body.get("fileName", "form.pdf")
@@ -764,7 +744,7 @@ def audit():
         },
         json={
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "system": [
                 {
                     "type": "text",
@@ -791,8 +771,12 @@ def audit():
     return jsonify({"report": report})
 
 
-@app.route("/save-api-key", methods=["POST", "OPTIONS"])
-def save_api_key():
+# /save-api-key endpoint removed — API key is now managed server-side
+
+
+@app.route("/save-audit-history", methods=["POST", "OPTIONS"])
+def save_audit_history():
+    """Save a completed audit batch to Supabase for history review."""
     if request.method == "OPTIONS":
         return "", 200
 
@@ -805,32 +789,37 @@ def save_api_key():
         return jsonify({"error": "Invalid session"}), 401
 
     body = request.get_json()
-    api_key = body.get("apiKey", "")
-    if not api_key.startswith("sk-ant-"):
-        return jsonify({"error": "Invalid API key format"}), 400
+    results = body.get("results", [])
+    if not results:
+        return jsonify({"error": "No results to save"}), 400
 
-    # Encrypt
-    iv = os.urandom(16)
-    aesgcm = AESGCM(ENCRYPTION_KEY)
-    encrypted_with_tag = aesgcm.encrypt(iv, api_key.encode(), None)
-    tag = encrypted_with_tag[-16:]
-    ciphertext = encrypted_with_tag[:-16]
-    stored = f"{iv.hex()}:{tag.hex()}:{ciphertext.hex()}"
+    approved = sum(1 for r in results if r.get("verdict") == "approved")
+    correction = sum(1 for r in results if r.get("verdict") == "correction")
+    block = sum(1 for r in results if r.get("verdict") == "block")
+    error = sum(1 for r in results if r.get("verdict") == "error")
 
     r = requests.post(
-        f"{SB_URL}/rest/v1/api_keys",
+        f"{SB_URL}/rest/v1/audit_history",
         headers={
             "apikey": SB_SERVICE_KEY,
             "Authorization": f"Bearer {SB_SERVICE_KEY}",
             "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"
+            "Prefer": "return=representation"
         },
-        json={"user_id": user["id"], "encrypted_key": stored}
+        json={
+            "profile_id": user["id"],
+            "total_forms": len(results),
+            "approved_count": approved,
+            "correction_count": correction,
+            "block_count": block,
+            "error_count": error,
+            "results": results
+        }
     )
 
     if r.status_code not in [200, 201]:
-        return jsonify({"error": "Failed to save key"}), 500
-    return jsonify({"success": True})
+        return jsonify({"error": "Failed to save audit history"}), 500
+    return jsonify({"success": True, "id": r.json()[0].get("id") if r.json() else None})
 
 
 @app.route("/cancel-subscription", methods=["POST", "OPTIONS"])
