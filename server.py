@@ -774,6 +774,36 @@ def audit():
 # /save-api-key endpoint removed — API key is now managed server-side
 
 
+@app.route("/admin/usage-this-month", methods=["GET", "OPTIONS"])
+def admin_usage_this_month():
+    """Return total forms audited per user since a given date."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    since = request.args.get("since", "")
+    query = f"{SB_URL}/rest/v1/audit_history?select=profile_id,total_forms"
+    if since:
+        query += f"&created_at=gte.{since}"
+
+    r = requests.get(
+        query,
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    rows = r.json() if r.status_code == 200 else []
+
+    # Aggregate total_forms per profile_id
+    counts = {}
+    for row in rows:
+        pid = row.get("profile_id")
+        if pid:
+            counts[pid] = counts.get(pid, 0) + (row.get("total_forms") or 0)
+
+    result = [{"profile_id": pid, "total_forms": total} for pid, total in counts.items()]
+    return jsonify(result)
+
+
 @app.route("/save-audit-history", methods=["POST", "OPTIONS"])
 def save_audit_history():
     """Save a completed audit batch to Supabase for history review."""
