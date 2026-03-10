@@ -6,12 +6,64 @@ import json
 import base64
 import hashlib
 import hmac
+import io
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 app = Flask(__name__)
 CORS(app, origins=["https://4473pro.com", "https://www.4473pro.com"])
 
 import stripe
+
+# --- PDF Instruction Page Stripper ---
+try:
+    import pypdf
+    PYPDF_AVAILABLE = True
+except ImportError:
+    PYPDF_AVAILABLE = False
+
+_INSTRUCTION_KEYWORDS = [
+    "INSTRUCTIONS FOR QUESTION",
+    "Instructions to Transferor",
+    "Instructions to Transferee",
+    "Transferor/Seller Instructions",
+    "Transferee/Buyer Instructions",
+    "GENERAL INSTRUCTIONS",
+    "PURPOSE OF THE FORM",
+    "Penalties provided in 18 U.S.C. 924",
+    "OMB No. 1140",
+    "NOTICE: Prepare in original only",
+]
+
+def _is_instruction_page(page_text):
+    text_upper = page_text.upper()
+    matches = sum(1 for kw in _INSTRUCTION_KEYWORDS if kw.upper() in text_upper)
+    return matches >= 2
+
+def strip_instruction_pages(pdf_base64):
+    """Remove ATF instruction pages from PDF before sending to AI. Returns original if anything fails."""
+    if not PYPDF_AVAILABLE:
+        return pdf_base64
+    try:
+        pdf_bytes = base64.b64decode(pdf_base64)
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        writer = pypdf.PdfWriter()
+        kept = 0
+        for page in reader.pages:
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            if not _is_instruction_page(text):
+                writer.add_page(page)
+                kept += 1
+        if kept == 0:
+            return pdf_base64  # safety: never send empty PDF
+        output = io.BytesIO()
+        writer.write(output)
+        return base64.b64encode(output.getvalue()).decode('utf-8')
+    except Exception:
+        return pdf_base64  # fail silently, return original
+
 
 SB_URL = os.environ.get("SUPABASE_URL")
 SB_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -87,7 +139,8 @@ OUT-OF-STATE ID RULES:
 
 SECTION A — FIREARM DESCRIPTION RULES:
 - Q1 Manufacturer/Importer: For imported firearms, BOTH the foreign manufacturer AND the U.S. importer must be listed (e.g., "HS Produkt / Springfield Armory"). If only one is recorded for an imported firearm, flag as REQUIRES CORRECTION.
-- DOMESTIC MANUFACTURER RULE: Many well-known firearms manufacturers are U.S.-based and NEVER require an importer. Do NOT flag a missing importer for any of the following domestic manufacturers (and any other manufacturer you recognize as U.S.-based): Ruger, Smith & Wesson, S&W, Colt, Remington, Mossberg, Savage, Marlin, Henry, Kimber, Daniel Defense, Windham Weaponry, Anderson Manufacturing, Aero Precision, Del-Ton, DPMS, Bushmaster, Les Baer, Wilson Combat, Ed Brown, Nighthawk Custom, Rock Island Armory (US models), Kahr Arms, Kel-Tec, Hi-Point, Taurus USA, Diamondback, LWRC, BCM (Bravo Company), Stag Arms, Christensen Arms, Weatherby (US-made models), Barrett, Alexander Arms, Franklin Armory, Palmetto State Armory, PSA. If the manufacturer is clearly a U.S. company, no importer is required — do not flag.
+- DOMESTIC MANUFACTURER RULE: Many well-known firearms manufacturers are U.S.-based and NEVER require an importer. Do NOT flag a missing importer for any of the following domestic manufacturers (and any other manufacturer you recognize as U.S.-based): Ruger, Smith & Wesson, S&W, Colt, Remington, Mossberg, Savage, Marlin, Henry, Kimber, Daniel Defense, Windham Weaponry, Anderson Manufacturing, Aero Precision, Del-Ton, DPMS, Bushmaster, Les Baer, Wilson Combat, Ed Brown, Nighthawk Custom, Rock Island Armory (US models), Kahr Arms, Kel-Tec, Hi-Point, Taurus USA, Diamondback, LWRC, BCM (Bravo Company), Stag Arms, Christensen Arms, Weatherby (US-made models), Barrett, Alexander Arms, Franklin Armory, Palmetto State Armory, PSA, FN America, FN America LLC. If the manufacturer is clearly a U.S. company, no importer is required — do not flag.
+- FN AMERICA SPECIAL NOTE: FN America LLC manufactures firearms in Columbia, South Carolina including the FN 15 series (AR-15/M16 pattern rifles and lower receivers), M4, and M16 military variants. FN America is a U.S.-based manufacturer — do NOT confuse it with its Belgian parent company FN Herstal. Any firearm marked "FN America", "FN America LLC", or bearing Columbia, SC rollmarks is domestically manufactured and requires NO importer listing.
 - Q1 Privately Made Firearm (PMF): If the firearm is a PMF, it must be identified as such in Q1. PMFs must be marked with the FFL's abbreviated license number as a prefix before transfer.
 - Q2 Model, Q3 Serial Number, Q4 Type, Q5 Caliber/Gauge: All must be present and complete. A missing or blank serial number is only acceptable for certain pre-1968 firearms (record "NSN" or "None Visible"). Flag any other blank serial number.
 - Serial number transcription: If a disposition receipt is present, verify the serial number on the 4473 matches exactly. Transposed digits or character substitutions (0 vs O, 1 vs l) are REQUIRES CORRECTION.
@@ -684,6 +737,9 @@ def audit():
     file_name = body.get("fileName", "form.pdf")
     file_data = body.get("fileData", "")
     file_type = body.get("fileType", "application/pdf")
+
+    # Strip ATF instruction pages before sending to AI (reduces token cost)
+    file_data = strip_instruction_pages(file_data)
 
     content_block = {
         "type": "document",
