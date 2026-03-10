@@ -1617,8 +1617,8 @@ def admin_clear_cache():
 def admin_extend_access(user_id):
     """
     Extend access for an admin-created account by N days from today (or from
-    current access_until if it hasn't expired yet, whichever is later).
-    For Stripe subscribers, adds a Stripe billing cycle anchor delay instead.
+    current access_until if not yet expired, whichever is later).
+    For Stripe subscribers, delays next billing via trial_end.
     """
     if request.method == "OPTIONS":
         return "", 200
@@ -1631,7 +1631,6 @@ def admin_extend_access(user_id):
     if days not in (30, 60, 90):
         return jsonify({"error": "Invalid days value. Must be 30, 60, or 90."}), 400
 
-    # Fetch current profile
     r = requests.get(
         f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=email,subscription_status,stripe_subscription_id,access_until,created_by_admin",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"},
@@ -1645,13 +1644,11 @@ def admin_extend_access(user_id):
     stripe_sub_id = profile.get("stripe_subscription_id", "")
 
     if stripe_sub_id:
-        # Stripe subscriber — postpone the billing anchor date
         try:
             import stripe as stripe_lib
             stripe_lib.api_key = STRIPE_SECRET_KEY
             sub = stripe_lib.Subscription.retrieve(stripe_sub_id)
             current_end = sub.get("current_period_end", 0)
-            import time
             new_anchor = current_end + (days * 86400)
             stripe_lib.Subscription.modify(
                 stripe_sub_id,
@@ -1665,7 +1662,6 @@ def admin_extend_access(user_id):
         except Exception as e:
             return jsonify({"error": f"Stripe error: {str(e)}"}), 500
     else:
-        # Admin-created account — extend access_until
         current_until = profile.get("access_until")
         if current_until:
             try:
@@ -1692,86 +1688,6 @@ def admin_extend_access(user_id):
             "message": f"Access extended by {days} days. Active until {datetime.datetime.fromisoformat(new_until).strftime('%b %d, %Y')}."
         })
 
-
-
-@app.route("/admin/extend-access/<user_id>", methods=["POST", "OPTIONS"])
-def admin_extend_access(user_id):
-    """
-    Extend access for an admin-created account by N days from today (or from
-    current access_until if it hasn't expired yet, whichever is later).
-    For Stripe subscribers, adds a Stripe billing cycle anchor delay instead.
-    """
-    if request.method == "OPTIONS":
-        return "", 200
-    if not verify_admin(request):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    import datetime
-    body = request.get_json(silent=True) or {}
-    days = int(body.get("days", 30))
-    if days not in (30, 60, 90):
-        return jsonify({"error": "Invalid days value. Must be 30, 60, or 90."}), 400
-
-    # Fetch current profile
-    r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=email,subscription_status,stripe_subscription_id,access_until,created_by_admin",
-        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"},
-        timeout=10
-    )
-    profiles = r.json()
-    if not profiles:
-        return jsonify({"error": "User not found"}), 404
-    profile = profiles[0]
-
-    stripe_sub_id = profile.get("stripe_subscription_id", "")
-
-    if stripe_sub_id:
-        # Stripe subscriber — postpone the billing anchor date
-        try:
-            import stripe as stripe_lib
-            stripe_lib.api_key = STRIPE_SECRET_KEY
-            sub = stripe_lib.Subscription.retrieve(stripe_sub_id)
-            current_end = sub.get("current_period_end", 0)
-            import time
-            new_anchor = current_end + (days * 86400)
-            stripe_lib.Subscription.modify(
-                stripe_sub_id,
-                trial_end=new_anchor,
-                proration_behavior="none"
-            )
-            return jsonify({
-                "success": True,
-                "message": f"Billing extended by {days} days. Next charge pushed to {datetime.datetime.utcfromtimestamp(new_anchor).strftime('%b %d, %Y')}."
-            })
-        except Exception as e:
-            return jsonify({"error": f"Stripe error: {str(e)}"}), 500
-    else:
-        # Admin-created account — extend access_until
-        current_until = profile.get("access_until")
-        if current_until:
-            try:
-                base = datetime.datetime.fromisoformat(current_until.replace("Z", "+00:00")).replace(tzinfo=None)
-                base = max(base, datetime.datetime.utcnow())
-            except Exception:
-                base = datetime.datetime.utcnow()
-        else:
-            base = datetime.datetime.utcnow()
-
-        new_until = (base + datetime.timedelta(days=days)).isoformat()
-        requests.patch(
-            f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}",
-            headers={
-                "apikey": SB_SERVICE_KEY,
-                "Authorization": f"Bearer {SB_SERVICE_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={"access_until": new_until, "subscription_status": "active"},
-            timeout=10
-        )
-        return jsonify({
-            "success": True,
-            "message": f"Access extended by {days} days. Active until {datetime.datetime.fromisoformat(new_until).strftime('%b %d, %Y')}."
-        })
 
 @app.route("/admin/cancel-subscription/<user_id>", methods=["POST", "OPTIONS"])
 def admin_cancel_subscription(user_id):
