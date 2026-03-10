@@ -1249,7 +1249,7 @@ You MUST search the web for current information about the buyer's state firearm 
 Respond ONLY with a valid JSON object — no preamble, no markdown, no explanation outside the JSON. Use this exact structure:
 {
   "verdict": "CLEAR" | "RESTRICTED" | "BLOCKED" | "VERIFY",
-  "summary": "2-3 sentence plain English summary of the situation",
+  "summary": "Plain English summary of the situation — include all relevant details, do not truncate",
   "restrictions": [
     {
       "type": "permit" | "wait" | "block" | "other",
@@ -1294,7 +1294,7 @@ def run_transfer_check_ai(buyer_state, firearm_type, ffl_state="the FFL's state"
         },
         json={
             "model": "claude-sonnet-4-6",
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "system": TRANSFER_CHECK_PROMPT,
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
             "messages": [{"role": "user", "content": user_query}]
