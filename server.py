@@ -685,18 +685,10 @@ def audit():
     file_data = body.get("fileData", "")
     file_type = body.get("fileType", "application/pdf")
 
-    ext = file_name.rsplit(".", 1)[-1].lower()
-    if ext in ["jpg", "jpeg", "png", "webp", "heic"]:
-        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "heic": "image/heic"}
-        content_block = {
-            "type": "image",
-            "source": {"type": "base64", "media_type": mime_map.get(ext, "image/jpeg"), "data": file_data}
-        }
-    else:
-        content_block = {
-            "type": "document",
-            "source": {"type": "base64", "media_type": "application/pdf", "data": file_data}
-        }
+    content_block = {
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf", "data": file_data}
+    }
 
     ccw_exempt = profile.get("ccw_exempt", False)
     ccw_permit_name = profile.get("ccw_permit_name", "")
