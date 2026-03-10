@@ -78,6 +78,7 @@ MILITARY BUYER RULES (ATF Form 4473 August 2023 Revision, ATF Ruling 2001-5, 18 
   2. Is the buyer's ID consistent with either the duty station state OR the Q10 residence state? If yes → document as a compliant military transfer. Do NOT flag as cross-state residency issue.
   3. If Q10 state differs from FFL state AND Q26c is blank AND no military documentation is present → flag as cross-state residency issue requiring correction.
 - FORT CAMPBELL SPECIAL CASE: Fort Campbell is unique — the installation physically straddles the Kentucky/Tennessee state line. Soldiers assigned to Fort Campbell are legal residents of BOTH states and may purchase handguns from FFLs in either KY or TN. If Q26c references Fort Campbell (any variation: "Fort Campbell", "Ft. Campbell", "Ft Campbell", KY 42223 or TN zip codes on-post) → the transfer is compliant regardless of whether the FFL is in KY or TN and regardless of whether the buyer's Q10 address is in KY or TN.
+- MILITARY PCS ORDER DATE LOGIC: PCS orders are valid as long as they were issued BEFORE the transfer date. A soldier with PCS orders dated in a prior year (e.g., October 2025) who transfers a firearm in a later year (e.g., March 2026) has valid, current orders — the earlier date means the orders were issued well before the transfer, which is correct and compliant. Do NOT flag PCS orders because their issue date precedes the transfer date. Only flag if PCS orders are dated AFTER the transfer date, which would mean the orders were not yet in effect at the time of transfer.
 - Other duty stations near state lines (e.g., Fort Eisenhower/Georgia, Fort Novosel/Alabama) follow the general military exception above but do NOT have Fort Campbell's unique dual-state legal residency status.
 
 OUT-OF-STATE ID RULES:
@@ -86,6 +87,7 @@ OUT-OF-STATE ID RULES:
 
 SECTION A — FIREARM DESCRIPTION RULES:
 - Q1 Manufacturer/Importer: For imported firearms, BOTH the foreign manufacturer AND the U.S. importer must be listed (e.g., "HS Produkt / Springfield Armory"). If only one is recorded for an imported firearm, flag as REQUIRES CORRECTION.
+- DOMESTIC MANUFACTURER RULE: Many well-known firearms manufacturers are U.S.-based and NEVER require an importer. Do NOT flag a missing importer for any of the following domestic manufacturers (and any other manufacturer you recognize as U.S.-based): Ruger, Smith & Wesson, S&W, Colt, Remington, Mossberg, Savage, Marlin, Henry, Kimber, Daniel Defense, Windham Weaponry, Anderson Manufacturing, Aero Precision, Del-Ton, DPMS, Bushmaster, Les Baer, Wilson Combat, Ed Brown, Nighthawk Custom, Rock Island Armory (US models), Kahr Arms, Kel-Tec, Hi-Point, Taurus USA, Diamondback, LWRC, BCM (Bravo Company), Stag Arms, Christensen Arms, Weatherby (US-made models), Barrett, Alexander Arms, Franklin Armory, Palmetto State Armory, PSA. If the manufacturer is clearly a U.S. company, no importer is required — do not flag.
 - Q1 Privately Made Firearm (PMF): If the firearm is a PMF, it must be identified as such in Q1. PMFs must be marked with the FFL's abbreviated license number as a prefix before transfer.
 - Q2 Model, Q3 Serial Number, Q4 Type, Q5 Caliber/Gauge: All must be present and complete. A missing or blank serial number is only acceptable for certain pre-1968 firearms (record "NSN" or "None Visible"). Flag any other blank serial number.
 - Serial number transcription: If a disposition receipt is present, verify the serial number on the 4473 matches exactly. Transposed digits or character substitutions (0 vs O, 1 vs l) are REQUIRES CORRECTION.
@@ -93,6 +95,7 @@ SECTION A — FIREARM DESCRIPTION RULES:
 SECTION B — BUYER ELIGIBILITY RULES:
 - Q10 Address: Must be a physical residential address, not a P.O. Box. Flag P.O. Box addresses as REQUIRES CORRECTION.
 - Q10 "Reside in City Limits": This checkbox is required on the current (August 2023) form revision. If it is blank or unanswered, flag as REQUIRES CORRECTION.
+- Q10 State of Residence checkbox: May be answered Yes, No, OR Unknown. "Unknown" is a valid and accepted answer on the form — do NOT flag it as missing or incomplete.
 - Q18 Buyer Signature: Must be present. A missing buyer signature is REQUIRES CORRECTION.
 - Q19 Buyer Certification Date: Must be present. A missing or blank certification date is REQUIRES CORRECTION.
 - Q21.a "Are you the actual transferee/buyer?": Must be answered "Yes." A "No" answer is REQUIRES CORRECTION (possible straw purchase — the FFL must not complete the transfer).
@@ -129,6 +132,14 @@ MULTI-COPY FORM RULES (ATF Ruling 2022-1):
   - Do NOT treat the first copy as a "preliminary" or "draft" form and give it a pass. The first copy is the original and its errors count.
   - The corrected copy (second copy) should be evaluated for whether the corrections address the original errors. If the corrected copy is complete and compliant, note it as compliant per ATF Ruling 2022-1.
   - The overall verdict should reflect: original had flagged error(s); corrected copy is compliant per ATF Ruling 2022-1 — if the correction resolves the issue, the verdict may be APPROVED if no other open issues remain.
+
+FILE-LEVEL VERDICT RULES (Multiple 4473s in one file):
+- A single submitted file may contain multiple Form 4473s due to corrections, NICS delays, overturns, or re-submissions. This is normal and expected.
+- YOU MUST AUDIT EVERY FORM IN THE FILE. Do not skip any form, even if an earlier form appears correct.
+- After auditing all forms, render a SINGLE file-level verdict based on the OVERALL compliance of the complete file:
+  - If the file contains a valid, fully compliant 4473 that properly supersedes or documents any prior forms (corrections, delays, overturns) → the file-level verdict is APPROVED. Do not penalize the file for the existence of earlier corrected or delayed forms — that is the normal ATF-compliant process.
+  - Only issue REQUIRES CORRECTION if there is an unresolved compliance problem that is NOT addressed by any other form or supporting document in the file.
+  - A file with an original error AND a proper correction on file is a COMPLIANT file, not a REQUIRES CORRECTION file.
 
 CORRECTION RULES:
 - If a field contains a visible correction (crossed out and initialed, correction photocopy attached, or correction log noted) → mark as COMPLIANT with a brief note that the correction is documented. Do NOT use a corrected field to sustain a REQUIRES CORRECTION verdict.
@@ -743,7 +754,7 @@ def audit():
             "anthropic-beta": "prompt-caching-2024-07-31"
         },
         json={
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-sonnet-4-6",
             "max_tokens": 8192,
             "system": [
                 {
@@ -1333,7 +1344,7 @@ def run_transfer_check_ai(buyer_state, firearm_type, ffl_state="the FFL's state"
             "content-type": "application/json"
         },
         json={
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-sonnet-4-6",
             "max_tokens": 4096,
             "system": TRANSFER_CHECK_PROMPT,
             "tools": [{"type": "web_search_20250305", "name": "web_search"}],
