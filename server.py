@@ -244,7 +244,7 @@ def get_user_from_token(token):
 
 def get_profile(user_id):
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,ccw_permit_name,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,owner_pin,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     data = r.json()
@@ -610,14 +610,16 @@ def build_system_prompt(ccw_exempt=False, ccw_permit_name=None, business_name=No
         )
 
     # CCW NICS exemption
-    if ccw_exempt and ccw_permit_name:
+    if ccw_exempt:
         prompt += (
-            f"\n\nSTATE-SPECIFIC RULE — CCW NICS EXEMPTION: This FFL's state allows "
-            f"firearm transfers without a NICS background check when the buyer presents "
-            f"a valid concealed carry permit. The permit name is: {ccw_permit_name}. "
-            f"If a valid {ccw_permit_name} is documented, Section C NICS fields are "
-            f"N/A — do not flag them as missing. The permit must have been issued within "
-            f"the last 5 years to qualify."
+            "\n\nSTATE-SPECIFIC RULE — CCW NICS EXEMPTION: This FFL's state allows "
+            "firearm transfers without a NICS background check when the buyer presents "
+            "a valid concealed carry permit (any state-issued CCW/carry permit). "
+            "If any concealed carry permit, handgun carry permit, or equivalent is "
+            "documented anywhere on the form (including Section D or buyer notes), "
+            "treat Section C NICS fields as N/A — do not flag them as missing or incomplete. "
+            "The permit must appear to have been issued within the last 5 years to qualify. "
+            "Accept any common abbreviation (HCP, CCDW, CWP, CFP, LTC, CPL, etc.)."
         )
 
     # Custom FFL rules (appended last)
@@ -650,6 +652,7 @@ def save_profile():
         return jsonify({"error": "Invalid session"}), 401
 
     body = request.get_json()
+    pin = body.get("owner_pin", "").strip()
     update_data = {
         "onboarding_completed": True,
         "business_name": body.get("business_name", ""),
@@ -657,7 +660,10 @@ def save_profile():
         "phone": body.get("phone", ""),
         "state": body.get("state", ""),
         "monthly_transfers": body.get("monthly_transfers", ""),
+        "ccw_exempt": body.get("ccw_exempt", False),
     }
+    if pin and len(pin) == 4 and pin.isdigit():
+        update_data["owner_pin"] = pin
 
     r = requests.patch(
         f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
@@ -747,11 +753,9 @@ def audit():
     }
 
     ccw_exempt = profile.get("ccw_exempt", False)
-    ccw_permit_name = profile.get("ccw_permit_name", "")
     business_name = profile.get("business_name", "")
     system_prompt = build_system_prompt(
         ccw_exempt=ccw_exempt,
-        ccw_permit_name=ccw_permit_name,
         business_name=business_name,
         delayed_transfer_rule=profile.get("delayed_transfer_rule", "default_proceed"),
         q32_notation_patterns=profile.get("q32_notation_patterns", ""),
@@ -1903,6 +1907,148 @@ def admin_maintenance():
     if r.status_code not in [200, 204]:
         return jsonify({"error": "Failed to update maintenance mode"}), 500
     return jsonify({"success": True, "mode": mode})
+
+
+@app.route("/verify-pin", methods=["POST", "OPTIONS"])
+def verify_pin():
+    """Verify owner PIN before allowing protected setting changes."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    body = request.get_json()
+    submitted_pin = str(body.get("pin", "")).strip()
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}&select=owner_pin",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}"
+        }
+    )
+    if r.status_code not in [200, 206]:
+        return jsonify({"error": "Could not verify PIN"}), 500
+
+    rows = r.json()
+    if not rows:
+        return jsonify({"error": "Profile not found"}), 404
+
+    stored_pin = str(rows[0].get("owner_pin", "") or "").strip()
+
+    if not stored_pin:
+        return jsonify({"error": "No PIN set on this account. Please set a PIN in Settings first."}), 400
+
+    if submitted_pin != stored_pin:
+        return jsonify({"error": "Incorrect PIN."}), 403
+
+    return jsonify({"success": True})
+
+
+@app.route("/toggle-ccw-exempt", methods=["POST", "OPTIONS"])
+def toggle_ccw_exempt():
+    """Toggle CCW NICS exemption — requires PIN verified on client before calling."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    body = request.get_json()
+    submitted_pin = str(body.get("pin", "")).strip()
+    new_value = bool(body.get("ccw_exempt", False))
+
+    # Re-verify PIN server-side on every toggle
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}&select=owner_pin",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}"
+        }
+    )
+    if r.status_code not in [200, 206]:
+        return jsonify({"error": "Could not verify PIN"}), 500
+
+    rows = r.json()
+    stored_pin = str(rows[0].get("owner_pin", "") or "").strip() if rows else ""
+
+    if not stored_pin or submitted_pin != stored_pin:
+        return jsonify({"error": "Invalid PIN."}), 403
+
+    patch = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"ccw_exempt": new_value}
+    )
+    if patch.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to update setting"}), 500
+
+    return jsonify({"success": True, "ccw_exempt": new_value})
+
+
+@app.route("/set-owner-pin", methods=["POST", "OPTIONS"])
+def set_owner_pin():
+    """Set or change the owner PIN."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    body = request.get_json()
+    new_pin = str(body.get("pin", "")).strip()
+    current_pin = str(body.get("current_pin", "")).strip()
+
+    if not new_pin or len(new_pin) != 4 or not new_pin.isdigit():
+        return jsonify({"error": "PIN must be exactly 4 digits."}), 400
+
+    # If a PIN already exists, require the current PIN to change it
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}&select=owner_pin",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}"
+        }
+    )
+    rows = r.json() if r.status_code in [200, 206] else []
+    stored_pin = str(rows[0].get("owner_pin", "") or "").strip() if rows else ""
+
+    if stored_pin and current_pin != stored_pin:
+        return jsonify({"error": "Current PIN is incorrect."}), 403
+
+    patch = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"owner_pin": new_pin}
+    )
+    if patch.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to save PIN"}), 500
+
+    return jsonify({"success": True})
 
 
 @app.route("/admin/audit-history/<user_id>", methods=["GET", "OPTIONS"])
