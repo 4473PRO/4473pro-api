@@ -1909,6 +1909,40 @@ def admin_maintenance():
     return jsonify({"success": True, "mode": mode})
 
 
+@app.route("/update-compliance-field", methods=["POST", "OPTIONS"])
+def update_compliance_field():
+    """Update a single compliance field — used from settings page after PIN gate verified."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not token:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    body = request.get_json()
+    allowed = {"ccw_exempt"}
+    update = {k: v for k, v in body.items() if k in allowed}
+    if not update:
+        return jsonify({"error": "No valid fields provided"}), 400
+
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        },
+        json=update
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to update setting"}), 500
+    return jsonify({"success": True})
+
+
 @app.route("/verify-pin", methods=["POST", "OPTIONS"])
 def verify_pin():
     """Verify owner PIN before allowing protected setting changes."""
