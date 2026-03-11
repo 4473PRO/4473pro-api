@@ -2085,6 +2085,138 @@ def set_owner_pin():
     return jsonify({"success": True})
 
 
+@app.route("/admin/refresh-state-laws", methods=["POST", "OPTIONS"])
+def refresh_state_laws():
+    """
+    Thursday cron job — refreshes long gun state transfer restrictions via AI web search.
+    Called by Supabase pg_cron at 09:00 UTC (03:00 CST) every Friday.
+    Updates description, restriction_level, last_verified, updated_at on all
+    long_gun and both firearm_type records. Never deletes records.
+    """
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    import datetime
+
+    # Fetch all long gun relevant records
+    r = requests.get(
+        f"{SB_URL}/rest/v1/state_transfer_restrictions"
+        f"?firearm_type=in.(long_gun,both)&order=state_code.asc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    if r.status_code not in [200, 206]:
+        return jsonify({"error": "Failed to fetch state restrictions"}), 500
+
+    records = r.json()
+    if not records:
+        return jsonify({"error": "No records found"}), 404
+
+    today = datetime.date.today().isoformat()
+    updated = []
+    errors = []
+
+    for rec in records:
+        state_code = rec.get("state_code", "")
+        state_name = rec.get("state_name", state_code)
+        firearm_type = rec.get("firearm_type", "long_gun")
+        rec_id = rec.get("id")
+
+        try:
+            # Ask AI to research current long gun transfer laws for this state
+            research_prompt = (
+                f"You are a federal firearms compliance expert. Research the CURRENT {state_name} ({state_code}) "
+                f"state laws that affect OUT-OF-STATE long gun (rifle and shotgun) transfers FROM a licensed FFL dealer "
+                f"in another state TO a {state_name} resident. Search the web for the most current information. "
+                f"Focus only on: waiting periods, permits required, registration requirements, "
+                f"prohibited features or models, age requirements beyond federal law, and any outright blocks. "
+                "Respond in this exact JSON format with no other text: "
+                '{"restriction_level": "block or verify or note or none", '
+                '"restriction_type": "short description of restriction type or none", '
+                '"description": "1-3 sentence plain English summary for an FFL dealer. Be specific. If no restrictions beyond federal law, say so clearly."}'
+            )
+
+            ai_response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 512,
+                    "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                    "messages": [{"role": "user", "content": research_prompt}]
+                },
+                timeout=45
+            )
+
+            if ai_response.status_code != 200:
+                errors.append(f"{state_code}: AI call failed ({ai_response.status_code})")
+                continue
+
+            ai_data = ai_response.json()
+            # Extract text from response content blocks
+            raw_text = ""
+            for block in ai_data.get("content", []):
+                if block.get("type") == "text":
+                    raw_text += block.get("text", "")
+
+            # Parse JSON from response
+            import json as json_lib
+            import re
+            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if not json_match:
+                errors.append(f"{state_code}: Could not parse AI response")
+                continue
+
+            parsed = json_lib.loads(json_match.group())
+            restriction_level = parsed.get("restriction_level", rec.get("restriction_level", "note"))
+            restriction_type = parsed.get("restriction_type", rec.get("restriction_type", ""))
+            description = parsed.get("description", rec.get("description", ""))
+
+            # Validate restriction_level
+            if restriction_level not in ("block", "verify", "note", "none"):
+                restriction_level = "note"
+
+            # Update the record
+            patch = requests.patch(
+                f"{SB_URL}/rest/v1/state_transfer_restrictions?id=eq.{rec_id}",
+                headers={
+                    "apikey": SB_SERVICE_KEY,
+                    "Authorization": f"Bearer {SB_SERVICE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "restriction_level": restriction_level,
+                    "restriction_type": restriction_type,
+                    "description": description,
+                    "last_verified": today,
+                    "updated_at": "now()",
+                    "verified_by": "ai_cron"
+                }
+            )
+
+            if patch.status_code in [200, 204]:
+                updated.append(state_code)
+            else:
+                errors.append(f"{state_code}: Patch failed ({patch.status_code})")
+
+        except Exception as e:
+            errors.append(f"{state_code}: {str(e)}")
+            continue
+
+    return jsonify({
+        "success": True,
+        "updated": updated,
+        "update_count": len(updated),
+        "errors": errors,
+        "run_date": today
+    })
+
+
 @app.route("/admin/audit-history/<user_id>", methods=["GET", "OPTIONS"])
 def admin_get_audit_history(user_id):
     """Get audit history metadata for a user — no report content returned."""
