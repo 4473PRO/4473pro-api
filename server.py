@@ -1905,6 +1905,47 @@ def admin_maintenance():
     return jsonify({"success": True, "mode": mode})
 
 
+@app.route("/admin/audit-history/<user_id>", methods=["GET", "OPTIONS"])
+def admin_get_audit_history(user_id):
+    """Get audit history metadata for a user — no report content returned."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/audit_history"
+        f"?select=id,batch_date,total_forms,approved_count,correction_count,block_count,created_at"
+        f"&profile_id=eq.{user_id}&order=created_at.desc",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}"
+        }
+    )
+    if r.status_code not in [200, 206]:
+        return jsonify({"error": "Failed to fetch audit history"}), 500
+    return jsonify(r.json())
+
+
+@app.route("/admin/audit-history/<user_id>", methods=["DELETE"])
+def admin_delete_audit_history(user_id):
+    """Permanently delete all audit history for a user."""
+    if not verify_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    r = requests.delete(
+        f"{SB_URL}/rest/v1/audit_history?profile_id=eq.{user_id}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json"
+        }
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to delete audit history", "detail": r.text}), 500
+    return jsonify({"success": True})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8247))
     app.run(host="0.0.0.0", port=port)
