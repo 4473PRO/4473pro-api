@@ -80,8 +80,14 @@ ENCRYPTION_KEY = bytes.fromhex(os.environ.get("ENCRYPTION_KEY", "0" * 64))
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 
-# 4473 Pro product IDs — ignore all other Stripe products (e.g. Teachable)
+# 4473 Pro product IDs — subscription products only (ignore other Stripe products)
 VALID_PRODUCT_IDS = {"prod_U5zaGkcmpaayRM", "prod_U5zrlcGBf3n0V0"}
+
+# Credit block products are identified by name prefix in the webhook
+CREDIT_PRODUCT_PREFIX = "4473 Pro Audit Credits"
+
+# Owner account — always has unlimited audits regardless of credit balance
+OWNER_EMAIL = "info@4473pro.com"
 
 SYSTEM_PROMPT = """You are an expert ATF Form 4473 compliance auditor with deep knowledge of federal firearms regulations, ATF instructions, and Gun Control Act requirements. Your job is to carefully examine each Form 4473 and any supporting documents provided, then produce a thorough compliance audit report.
 
@@ -258,7 +264,7 @@ def get_user_from_token(token):
 
 def get_profile(user_id):
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,owner_pin,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules",
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=subscription_status,state,business_name,onboarding_completed,ccw_exempt,owner_pin,delayed_transfer_rule,q32_notation_patterns,pawn_shop_mode,sot_dealer,custom_rules,email,audit_credits,audit_credits_used,access_until,created_by_admin",
         headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
     )
     data = r.json()
@@ -465,6 +471,27 @@ def is_4473_product(session_or_invoice):
     return False
 
 
+def _add_credits_for_email(email, amount):
+    """Add audit credits to a user account by email. Credits accumulate — never expire."""
+    try:
+        r = requests.get(
+            f"{SB_URL}/rest/v1/profiles?email=eq.{email}&select=id,audit_credits",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        )
+        profiles = r.json()
+        if not profiles:
+            return
+        profile = profiles[0]
+        current = profile.get("audit_credits") or 0
+        requests.patch(
+            f"{SB_URL}/rest/v1/profiles?id=eq.{profile['id']}",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}", "Content-Type": "application/json"},
+            json={"audit_credits": current + amount}
+        )
+    except Exception:
+        pass
+
+
 @app.route("/stripe-webhook", methods=["POST"])
 def stripe_webhook():
     payload = request.get_data()
@@ -484,26 +511,43 @@ def stripe_webhook():
         subscription_id = data.get("subscription", "")
         if not email:
             return jsonify({"status": "no email"}), 200
-        # Check if it's a 4473 Pro product
+
         stripe.api_key = STRIPE_SECRET_KEY
         try:
             items = stripe.checkout.Session.list_line_items(data["id"])
-            is_4473 = False
+            is_subscription = False
+            credits_to_add = 0
+
             for item in items.data:
                 price = stripe.Price.retrieve(item.price.id, expand=["product"])
                 product_id = price.product.id if hasattr(price.product, 'id') else price.product
-                if product_id in VALID_PRODUCT_IDS:
-                    is_4473 = True
-                    break
-            if not is_4473:
-                return jsonify({"status": "not a 4473 Pro product"}), 200
-        except Exception:
-            pass
+                product_name = price.product.name if hasattr(price.product, 'name') else ""
 
-        # Try to update existing user, or create new one
-        updated = set_subscription_status(email, "active", customer_id, subscription_id)
-        if not updated:
-            create_supabase_user(email, customer_id, subscription_id)
+                if product_id in VALID_PRODUCT_IDS:
+                    is_subscription = True
+
+                elif product_name.startswith(CREDIT_PRODUCT_PREFIX):
+                    # Parse credit count from product name e.g. "4473 Pro Audit Credits — 25"
+                    try:
+                        parts = product_name.split("—")
+                        credits_to_add += int(parts[-1].strip())
+                    except Exception:
+                        pass
+
+            if is_subscription:
+                # New subscription purchase — create/activate account and add 10 credits
+                updated = set_subscription_status(email, "active", customer_id, subscription_id)
+                if not updated:
+                    create_supabase_user(email, customer_id, subscription_id)
+                # Add 10 credits for new subscription
+                _add_credits_for_email(email, 10)
+
+            elif credits_to_add > 0:
+                # Credit block purchase — add credits to existing account
+                _add_credits_for_email(email, credits_to_add)
+
+        except Exception as e:
+            pass
 
     elif event_type == "invoice.paid":
         email = data.get("customer_email", "")
@@ -511,7 +555,7 @@ def stripe_webhook():
         subscription_id = data.get("subscription", "")
         if not email:
             return jsonify({"status": "no email"}), 200
-        # Check product
+        # Check product — only handle subscription renewals here
         is_4473 = False
         for line in data.get("lines", {}).get("data", []):
             price_id = line.get("price", {}).get("id")
@@ -528,6 +572,8 @@ def stripe_webhook():
         if not is_4473:
             return jsonify({"status": "not a 4473 Pro product"}), 200
         set_subscription_status(email, "active", customer_id, subscription_id)
+        # Add 10 credits on every subscription renewal
+        _add_credits_for_email(email, 10)
 
     elif event_type == "customer.subscription.deleted":
         customer_id = data.get("customer", "")
@@ -748,6 +794,23 @@ def audit():
                 return jsonify({"error": "Trial access has expired. Please subscribe to continue."}), 403
         except Exception:
             pass
+
+    # Check and deduct audit credits (owner account is exempt)
+    user_email = profile.get("email", "") or user.get("email", "")
+    is_owner = (user_email.lower() == OWNER_EMAIL.lower())
+    if not is_owner:
+        credits = profile.get("audit_credits", 0) or 0
+        if credits <= 0:
+            return jsonify({"error": "No audit credits remaining. Purchase more credits from your billing page."}), 403
+        # Deduct 1 credit atomically
+        requests.patch(
+            f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}", "Content-Type": "application/json"},
+            json={
+                "audit_credits": credits - 1,
+                "audit_credits_used": (profile.get("audit_credits_used") or 0) + 1
+            }
+        )
 
     api_key = OWNER_ANTHROPIC_KEY
     if not api_key:
