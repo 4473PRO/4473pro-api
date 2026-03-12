@@ -2855,20 +2855,39 @@ def kb_search():
         )
     else:
         # Full-text search via Supabase's textSearch
-        encoded = requests.utils.quote(query)
-        r = requests.get(
-            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&fts=to_tsquery('{encoded}')&select=id,title,content,tags,is_global,owner_id&order=title.asc",
-            headers=SB_HEADERS()
-        )
-        # Fallback: if fts returns nothing, do ilike search on title+content
-        results = r.json() if r.status_code == 200 else []
+        # Build keyword list — strip stopwords, join remaining terms
+        stopwords = {'what','is','the','for','an','a','of','on','to','in','do','i','my',
+                     'how','does','which','are','and','or','with','use','need','can','get',
+                     'have','has','that','this','at','it','its','by','be','was','used',
+                     'tell','me','about','give','find','show','should'}
+        import re as _re
+        words = [w for w in _re.sub(r'[^a-z0-9]', ' ', query.lower()).split()
+                 if len(w) > 1 and w not in stopwords]
+
+        results = []
+
+        # Try ilike search on each keyword — collect union of matches
+        seen_ids = set()
+        for word in (words if words else [query]):
+            like_q = f"%{word}%"
+            r2 = requests.get(
+                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)},tags.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+                headers=SB_HEADERS()
+            )
+            for entry in (r2.json() if r2.status_code == 200 else []):
+                if entry['id'] not in seen_ids:
+                    seen_ids.add(entry['id'])
+                    results.append(entry)
+
+        # If still nothing, fall back to full raw query ilike
         if not results:
             like_q = f"%{query}%"
-            r2 = requests.get(
+            r3 = requests.get(
                 f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
                 headers=SB_HEADERS()
             )
-            results = r2.json() if r2.status_code == 200 else []
+            results = r3.json() if r3.status_code == 200 else []
+
         return jsonify({"results": results, "query": query})
 
     results = r.json() if r.status_code == 200 else []
