@@ -2504,6 +2504,7 @@ def lookup_staff_email():
     return jsonify({"email": fake_email})
 
 
+
 @app.route("/get-my-role", methods=["GET", "OPTIONS"])
 def get_my_role():
     """Returns the caller's role and owner_id. Used by frontend for routing."""
