@@ -2785,34 +2785,30 @@ def kb_search():
     query = request.args.get("q", "").strip()
 
     if not query:
+        # Return all entries for this account + global, ordered by title
         r = requests.get(
             f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&order=title.asc&select=id,title,content,tags,is_global,owner_id",
             headers=SB_HEADERS()
         )
-        results = r.json() if r.status_code == 200 else []
-        return jsonify({"results": results, "query": query})
-
-    # Split query into individual terms and search each one across title, content, and tags
-    # Collect all matching entries, deduplicated, scored by how many terms matched
-    terms = [t for t in query.lower().split() if len(t) > 1]
-    seen = {}  # id -> (entry, score)
-
-    for term in terms:
-        like_q = requests.utils.quote(f"%{term}%")
+    else:
+        # Full-text search via Supabase's textSearch
+        encoded = requests.utils.quote(query)
         r = requests.get(
-            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{like_q},content.ilike.{like_q},tags.ilike.{like_q})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&fts=to_tsquery('{encoded}')&select=id,title,content,tags,is_global,owner_id&order=title.asc",
             headers=SB_HEADERS()
         )
-        if r.status_code == 200:
-            for entry in r.json():
-                eid = entry["id"]
-                if eid in seen:
-                    seen[eid] = (entry, seen[eid][1] + 1)
-                else:
-                    seen[eid] = (entry, 1)
+        # Fallback: if fts returns nothing, do ilike search on title+content
+        results = r.json() if r.status_code == 200 else []
+        if not results:
+            like_q = f"%{query}%"
+            r2 = requests.get(
+                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+                headers=SB_HEADERS()
+            )
+            results = r2.json() if r2.status_code == 200 else []
+        return jsonify({"results": results, "query": query})
 
-    # Sort by score descending (most terms matched = most relevant)
-    results = [e for e, s in sorted(seen.values(), key=lambda x: -x[1])]
+    results = r.json() if r.status_code == 200 else []
     return jsonify({"results": results, "query": query})
 
 
@@ -2901,6 +2897,105 @@ def kb_delete():
         f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&owner_id=eq.{owner['id']}",
         headers=SB_HEADERS()
     )
+    return jsonify({"success": True})
+
+
+@app.route("/save-ffl-expiration", methods=["POST", "OPTIONS"])
+def save_ffl_expiration():
+    """Save FFL expiration date for the owner's profile."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+    data = request.get_json()
+    exp_date = data.get("ffl_expiration_date", "")
+    # Validate date format YYYY-MM-DD or empty string to clear
+    if exp_date:
+        import re as _re
+        if not _re.match(r"^\d{4}-\d{2}-\d{2}$", exp_date):
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+    update_val = exp_date if exp_date else None
+    r = requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{owner['id']}",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        },
+        json={"ffl_expiration_date": update_val}
+    )
+    if r.status_code not in [200, 204]:
+        return jsonify({"error": "Failed to save expiration date"}), 500
+    return jsonify({"success": True})
+
+
+@app.route("/get-ffl-expiration", methods=["GET", "OPTIONS"])
+def get_ffl_expiration():
+    """Get FFL expiration date from profile."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+    # Get owner_id — works for both owners and staff
+    owner_id = get_owner_id(user["id"])
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{owner_id}&select=ffl_expiration_date",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    data = r.json()
+    exp_date = data[0].get("ffl_expiration_date") if data else None
+    return jsonify({"ffl_expiration_date": exp_date})
+
+
+@app.route("/submit-feedback", methods=["POST", "OPTIONS"])
+def submit_feedback():
+    """Submit support request or feature idea."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user or "id" not in user:
+        return jsonify({"error": "Invalid session"}), 401
+
+    data = request.get_json()
+    fb_type = data.get("type", "")
+    message = (data.get("message") or "").strip()
+
+    if fb_type not in ("support", "feature"):
+        return jsonify({"error": "type must be 'support' or 'feature'"}), 400
+    if not message:
+        return jsonify({"error": "message is required"}), 400
+    if len(message) > 2000:
+        return jsonify({"error": "message too long (2000 chars max)"}), 400
+
+    # Get user email for context
+    user_email = user.get("email", "")
+
+    # Insert into feedback table using service key
+    r = requests.post(
+        f"{SB_URL}/rest/v1/feedback",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        },
+        json={
+            "user_id": user["id"],
+            "type": fb_type,
+            "message": message,
+            "user_email": user_email,
+            "status": "new"
+        }
+    )
+    if r.status_code not in [200, 201, 204]:
+        return jsonify({"error": "Failed to submit feedback"}), 500
+
     return jsonify({"success": True})
 
 
