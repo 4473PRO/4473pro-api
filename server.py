@@ -12,6 +12,15 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 app = Flask(__name__)
 CORS(app, origins=["https://4473pro.com", "https://www.4473pro.com"])
 
+from flask import make_response
+
+def _cors_ok():
+    r = make_response("", 200)
+    r.headers["Access-Control-Allow-Origin"] = "*"
+    r.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    r.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return r
+
 import stripe
 
 # --- PDF Instruction Page Stripper ---
