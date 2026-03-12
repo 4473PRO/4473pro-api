@@ -2785,30 +2785,34 @@ def kb_search():
     query = request.args.get("q", "").strip()
 
     if not query:
-        # Return all entries for this account + global, ordered by title
         r = requests.get(
             f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&order=title.asc&select=id,title,content,tags,is_global,owner_id",
             headers=SB_HEADERS()
         )
-    else:
-        # Full-text search via Supabase's textSearch
-        encoded = requests.utils.quote(query)
-        r = requests.get(
-            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&fts=to_tsquery('{encoded}')&select=id,title,content,tags,is_global,owner_id&order=title.asc",
-            headers=SB_HEADERS()
-        )
-        # Fallback: if fts returns nothing, do ilike search on title+content
         results = r.json() if r.status_code == 200 else []
-        if not results:
-            like_q = f"%{query}%"
-            r2 = requests.get(
-                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
-                headers=SB_HEADERS()
-            )
-            results = r2.json() if r2.status_code == 200 else []
         return jsonify({"results": results, "query": query})
 
-    results = r.json() if r.status_code == 200 else []
+    # Split query into individual terms and search each one across title, content, and tags
+    # Collect all matching entries, deduplicated, scored by how many terms matched
+    terms = [t for t in query.lower().split() if len(t) > 1]
+    seen = {}  # id -> (entry, score)
+
+    for term in terms:
+        like_q = requests.utils.quote(f"%{term}%")
+        r = requests.get(
+            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{like_q},content.ilike.{like_q},tags.ilike.{like_q})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+            headers=SB_HEADERS()
+        )
+        if r.status_code == 200:
+            for entry in r.json():
+                eid = entry["id"]
+                if eid in seen:
+                    seen[eid] = (entry, seen[eid][1] + 1)
+                else:
+                    seen[eid] = (entry, 1)
+
+    # Sort by score descending (most terms matched = most relevant)
+    results = [e for e, s in sorted(seen.values(), key=lambda x: -x[1])]
     return jsonify({"results": results, "query": query})
 
 
