@@ -82,13 +82,18 @@ Examine every field in Sections A, B, C, D, and E of the Form 4473 (August 2023 
 VERDICT DEFINITIONS — USE EXACTLY ONE AT THE END:
 - APPROVED: Zero issues found anywhere. Every field complete, accurate, and compliant.
 - REQUIRES CORRECTION: Any issue, discrepancy, missing field, or flag was found — even minor ones.
-- DO NOT TRANSFER: Buyer is prohibited, NICS was denied, or a legal disqualifier is present.
+- DO NOT TRANSFER: Buyer is prohibited or a legal disqualifier is present AND the firearm was transferred anyway.
 
 CRITICAL VERDICT RULES:
 - NEVER revise your verdict. State it once at the end, correctly the first time.
 - If you mention ANY issue, flag, discrepancy, or correction anywhere in your report — the verdict MUST be REQUIRES CORRECTION, not APPROVED.
 - APPROVED means absolutely zero flags or issues anywhere in the entire report.
-- Only DO NOT TRANSFER for actual legal disqualifiers: prohibited person, denied NICS, underage buyer, or "Yes" answer to Q21.b or Q21.n.
+- Only DO NOT TRANSFER for actual legal disqualifiers: prohibited person, underage buyer, or "Yes" answer to Q21.b or Q21.n — AND only if a transfer date appears in Section E confirming the firearm was transferred despite the disqualifier.
+
+DENIED NICS — CRITICAL RULE:
+- If NICS was DENIED and NO transfer date is present in Section E → the dealer correctly refused the transfer → verdict is APPROVED (or REQUIRES CORRECTION if other unrelated issues exist). Do NOT issue DO NOT TRANSFER.
+- If NICS was DENIED and a transfer date IS present in Section E → the dealer transferred the firearm despite the denial → verdict is DO NOT TRANSFER.
+- A correctly handled NICS denial is compliant dealer behavior. Never penalize the compliance score for it.
 
 NAME RULES — READ CAREFULLY:
 - NEVER flag name order differences between the 4473 and a disposition receipt or supporting document. Name order varies by document type and is NOT an error.
@@ -2255,6 +2260,604 @@ def admin_delete_audit_history(user_id):
     )
     if r.status_code not in [200, 204]:
         return jsonify({"error": "Failed to delete audit history", "detail": r.text}), 500
+    return jsonify({"success": True})
+
+
+# ============================================================
+# SUB-USER (STAFF) ENDPOINTS
+# ============================================================
+
+SB_HEADERS = lambda: {
+    "apikey": SB_SERVICE_KEY,
+    "Authorization": f"Bearer {SB_SERVICE_KEY}",
+    "Content-Type": "application/json"
+}
+
+def get_owner_id(user_id):
+    """Return owner_id for a user — themselves if owner, parent if staff."""
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user_id}&select=role,parent_user_id",
+        headers=SB_HEADERS()
+    )
+    if r.status_code != 200 or not r.json():
+        return None
+    p = r.json()[0]
+    if p["role"] == "owner":
+        return user_id
+    return p.get("parent_user_id")
+
+def require_owner(token):
+    """Returns (user, error_response). Ensures caller is an owner."""
+    user = get_user_from_token(token)
+    if not user:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+    profile = get_profile(user["id"])
+    if not profile or profile.get("role", "owner") != "owner":
+        return None, (jsonify({"error": "Owner account required"}), 403)
+    return user, None
+
+@app.route("/create-subuser", methods=["POST", "OPTIONS"])
+def create_subuser():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    email = (data.get("email") or "").strip().lower()
+    can_audit = bool(data.get("can_run_audit", False))
+
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+
+    # Check sub-user count (max 6)
+    count_r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?parent_user_id=eq.{owner['id']}&select=id",
+        headers=SB_HEADERS()
+    )
+    if count_r.status_code == 200 and len(count_r.json()) >= 6:
+        return jsonify({"error": "Maximum of 6 staff accounts reached"}), 400
+
+    # Check subscription active
+    profile = get_profile(owner["id"])
+    if not profile or profile.get("subscription_status") not in ["active", "trialing"]:
+        return jsonify({"error": "Active subscription required"}), 403
+
+    # Create Supabase auth user
+    create_r = requests.post(
+        f"{SB_URL}/auth/v1/admin/users",
+        headers=SB_HEADERS(),
+        json={"email": email, "email_confirm": True, "password": None}
+    )
+    if create_r.status_code not in [200, 201]:
+        body = create_r.json()
+        return jsonify({"error": body.get("message", "Failed to create user")}), 400
+
+    new_user = create_r.json()
+    new_id = new_user["id"]
+
+    # Upsert profile as staff
+    requests.post(
+        f"{SB_URL}/rest/v1/profiles",
+        headers={**SB_HEADERS(), "Prefer": "resolution=merge-duplicates"},
+        json={
+            "id": new_id,
+            "role": "staff",
+            "parent_user_id": owner["id"],
+            "can_run_audit": can_audit,
+            "subscription_status": "active",
+            "onboarding_completed": True
+        }
+    )
+
+    # Send magic link so staff can set password
+    magic_r = requests.post(
+        f"{SB_URL}/auth/v1/admin/generate_link",
+        headers=SB_HEADERS(),
+        json={"type": "magiclink", "email": email}
+    )
+    magic_link = None
+    if magic_r.status_code == 200:
+        magic_link = magic_r.json().get("action_link")
+
+    return jsonify({"success": True, "user_id": new_id, "magic_link": magic_link})
+
+
+@app.route("/list-subusers", methods=["GET", "OPTIONS"])
+def list_subusers():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?parent_user_id=eq.{owner['id']}&select=id,role,can_run_audit,session_token",
+        headers=SB_HEADERS()
+    )
+    if r.status_code != 200:
+        return jsonify({"error": "Failed to list staff"}), 500
+
+    staff = r.json()
+    # Fetch emails from auth.users via admin API
+    result = []
+    for s in staff:
+        eu = requests.get(
+            f"{SB_URL}/auth/v1/admin/users/{s['id']}",
+            headers=SB_HEADERS()
+        )
+        email = eu.json().get("email", "") if eu.status_code == 200 else ""
+        result.append({
+            "id": s["id"],
+            "email": email,
+            "can_run_audit": s.get("can_run_audit", False),
+            "active": True
+        })
+
+    return jsonify({"staff": result})
+
+
+@app.route("/update-subuser", methods=["POST", "OPTIONS"])
+def update_subuser():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    staff_id = data.get("staff_id")
+    can_audit = data.get("can_run_audit")
+
+    if not staff_id:
+        return jsonify({"error": "staff_id required"}), 400
+
+    # Verify staff belongs to this owner
+    check = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{staff_id}&parent_user_id=eq.{owner['id']}&select=id",
+        headers=SB_HEADERS()
+    )
+    if check.status_code != 200 or not check.json():
+        return jsonify({"error": "Staff account not found"}), 404
+
+    patch = {}
+    if can_audit is not None:
+        patch["can_run_audit"] = bool(can_audit)
+
+    requests.patch(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{staff_id}",
+        headers=SB_HEADERS(),
+        json=patch
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/delete-subuser", methods=["POST", "OPTIONS"])
+def delete_subuser():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    staff_id = data.get("staff_id")
+    if not staff_id:
+        return jsonify({"error": "staff_id required"}), 400
+
+    # Verify ownership
+    check = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{staff_id}&parent_user_id=eq.{owner['id']}&select=id",
+        headers=SB_HEADERS()
+    )
+    if check.status_code != 200 or not check.json():
+        return jsonify({"error": "Staff account not found"}), 404
+
+    # Delete auth user (cascades to profile)
+    requests.delete(
+        f"{SB_URL}/auth/v1/admin/users/{staff_id}",
+        headers=SB_HEADERS()
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/get-my-role", methods=["GET", "OPTIONS"])
+def get_my_role():
+    """Returns the caller's role and owner_id. Used by frontend for routing."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?id=eq.{user['id']}&select=role,parent_user_id,can_run_audit",
+        headers=SB_HEADERS()
+    )
+    if r.status_code != 200 or not r.json():
+        return jsonify({"role": "owner", "can_run_audit": True})
+
+    p = r.json()[0]
+    return jsonify({
+        "role": p.get("role", "owner"),
+        "parent_user_id": p.get("parent_user_id"),
+        "can_run_audit": p.get("can_run_audit", True) if p.get("role") == "owner" else p.get("can_run_audit", False)
+    })
+
+
+# ============================================================
+# DAILY TASKS ENDPOINTS
+# ============================================================
+
+def get_task_date():
+    """Return today's task date — resets at 6am UTC."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    # If before 6am UTC, use yesterday's date as "today"
+    if now.hour < 6:
+        return (now - timedelta(days=1)).date().isoformat()
+    return now.date().isoformat()
+
+
+@app.route("/get-daily-tasks", methods=["GET", "OPTIONS"])
+def get_daily_tasks():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    owner_id = get_owner_id(user["id"])
+    if not owner_id:
+        return jsonify({"error": "Account error"}), 400
+
+    task_date = get_task_date()
+
+    # Get all active tasks for this account
+    tasks_r = requests.get(
+        f"{SB_URL}/rest/v1/daily_tasks?owner_id=eq.{owner_id}&active=eq.true&order=sort_order.asc",
+        headers=SB_HEADERS()
+    )
+    tasks = tasks_r.json() if tasks_r.status_code == 200 else []
+
+    # Get today's completions
+    comp_r = requests.get(
+        f"{SB_URL}/rest/v1/daily_task_completions?owner_id=eq.{owner_id}&task_date=eq.{task_date}&select=task_id,initials,completed_at",
+        headers=SB_HEADERS()
+    )
+    completions = comp_r.json() if comp_r.status_code == 200 else []
+    comp_map = {c["task_id"]: c for c in completions}
+
+    result = []
+    for t in tasks:
+        c = comp_map.get(t["id"])
+        result.append({
+            "id": t["id"],
+            "title": t["title"],
+            "sort_order": t["sort_order"],
+            "completed": c is not None,
+            "initials": c["initials"] if c else None,
+            "completed_at": c["completed_at"] if c else None
+        })
+
+    return jsonify({"tasks": result, "task_date": task_date})
+
+
+@app.route("/complete-task", methods=["POST", "OPTIONS"])
+def complete_task():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json()
+    task_id = data.get("task_id")
+    initials = (data.get("initials") or "").strip().upper()[:4]
+
+    if not task_id or not initials:
+        return jsonify({"error": "task_id and initials required"}), 400
+
+    owner_id = get_owner_id(user["id"])
+    task_date = get_task_date()
+
+    # Verify task belongs to this account
+    check = requests.get(
+        f"{SB_URL}/rest/v1/daily_tasks?id=eq.{task_id}&owner_id=eq.{owner_id}&select=id",
+        headers=SB_HEADERS()
+    )
+    if check.status_code != 200 or not check.json():
+        return jsonify({"error": "Task not found"}), 404
+
+    # Upsert completion (one completion per task per day)
+    requests.post(
+        f"{SB_URL}/rest/v1/daily_task_completions",
+        headers={**SB_HEADERS(), "Prefer": "resolution=merge-duplicates"},
+        json={
+            "task_id": task_id,
+            "owner_id": owner_id,
+            "initials": initials,
+            "task_date": task_date,
+            "completed_at": "now()"
+        }
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/uncomplete-task", methods=["POST", "OPTIONS"])
+def uncomplete_task():
+    """Allow undoing a task completion (same-day only)."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json()
+    task_id = data.get("task_id")
+    owner_id = get_owner_id(user["id"])
+    task_date = get_task_date()
+
+    requests.delete(
+        f"{SB_URL}/rest/v1/daily_task_completions?task_id=eq.{task_id}&owner_id=eq.{owner_id}&task_date=eq.{task_date}",
+        headers=SB_HEADERS()
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/task-log", methods=["GET", "OPTIONS"])
+def task_log():
+    """7-day completion log for owner review."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    from datetime import datetime, timezone, timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
+
+    # Join completions with task titles
+    r = requests.get(
+        f"{SB_URL}/rest/v1/daily_task_completions?owner_id=eq.{owner['id']}&task_date=gte.{cutoff}&select=task_id,initials,task_date,completed_at,daily_tasks(title)&order=task_date.desc,completed_at.desc",
+        headers=SB_HEADERS()
+    )
+    rows = r.json() if r.status_code == 200 else []
+    result = []
+    for row in rows:
+        result.append({
+            "task_title": row.get("daily_tasks", {}).get("title", "Unknown"),
+            "initials": row["initials"],
+            "task_date": row["task_date"],
+            "completed_at": row["completed_at"]
+        })
+
+    return jsonify({"log": result})
+
+
+@app.route("/save-task", methods=["POST", "OPTIONS"])
+def save_task():
+    """Create or update a daily task (owner only)."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    task_id = data.get("id")
+    title = (data.get("title") or "").strip()
+    sort_order = int(data.get("sort_order", 0))
+
+    if not title:
+        return jsonify({"error": "Title required"}), 400
+
+    if task_id:
+        # Update existing
+        requests.patch(
+            f"{SB_URL}/rest/v1/daily_tasks?id=eq.{task_id}&owner_id=eq.{owner['id']}",
+            headers=SB_HEADERS(),
+            json={"title": title, "sort_order": sort_order}
+        )
+    else:
+        # Create new
+        r = requests.post(
+            f"{SB_URL}/rest/v1/daily_tasks",
+            headers={**SB_HEADERS(), "Prefer": "return=representation"},
+            json={"owner_id": owner["id"], "title": title, "sort_order": sort_order}
+        )
+        if r.status_code not in [200, 201]:
+            return jsonify({"error": "Failed to save task"}), 500
+        task_id = r.json()[0]["id"] if r.json() else None
+
+    return jsonify({"success": True, "id": task_id})
+
+
+@app.route("/delete-task", methods=["POST", "OPTIONS"])
+def delete_task():
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    task_id = data.get("task_id")
+    if not task_id:
+        return jsonify({"error": "task_id required"}), 400
+
+    requests.delete(
+        f"{SB_URL}/rest/v1/daily_tasks?id=eq.{task_id}&owner_id=eq.{owner['id']}",
+        headers=SB_HEADERS()
+    )
+    return jsonify({"success": True})
+
+
+@app.route("/reorder-tasks", methods=["POST", "OPTIONS"])
+def reorder_tasks():
+    """Update sort_order for multiple tasks at once."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    tasks = data.get("tasks", [])  # [{id, sort_order}, ...]
+
+    for t in tasks:
+        requests.patch(
+            f"{SB_URL}/rest/v1/daily_tasks?id=eq.{t['id']}&owner_id=eq.{owner['id']}",
+            headers=SB_HEADERS(),
+            json={"sort_order": t["sort_order"]}
+        )
+
+    return jsonify({"success": True})
+
+
+# ============================================================
+# KNOWLEDGE BASE / POLICY LIBRARY ENDPOINTS
+# ============================================================
+
+@app.route("/kb/search", methods=["GET", "OPTIONS"])
+def kb_search():
+    """Search knowledge base — returns owner's entries + global entries."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    owner_id = get_owner_id(user["id"])
+    query = request.args.get("q", "").strip()
+
+    if not query:
+        # Return all entries for this account + global, ordered by title
+        r = requests.get(
+            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&order=title.asc&select=id,title,content,tags,is_global,owner_id",
+            headers=SB_HEADERS()
+        )
+    else:
+        # Full-text search via Supabase's textSearch
+        encoded = requests.utils.quote(query)
+        r = requests.get(
+            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&fts=to_tsquery('{encoded}')&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+            headers=SB_HEADERS()
+        )
+        # Fallback: if fts returns nothing, do ilike search on title+content
+        results = r.json() if r.status_code == 200 else []
+        if not results:
+            like_q = f"%{query}%"
+            r2 = requests.get(
+                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+                headers=SB_HEADERS()
+            )
+            results = r2.json() if r2.status_code == 200 else []
+        return jsonify({"results": results, "query": query})
+
+    results = r.json() if r.status_code == 200 else []
+    return jsonify({"results": results, "query": query})
+
+
+@app.route("/kb/entries", methods=["GET", "OPTIONS"])
+def kb_list():
+    """List all entries for owner management view."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/knowledge_base?owner_id=eq.{owner['id']}&order=title.asc&select=id,title,content,tags,created_at,updated_at",
+        headers=SB_HEADERS()
+    )
+    entries = r.json() if r.status_code == 200 else []
+    return jsonify({"entries": entries})
+
+
+@app.route("/kb/save", methods=["POST", "OPTIONS"])
+def kb_save():
+    """Create or update a knowledge base entry (owner only)."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    entry_id = data.get("id")
+    title = (data.get("title") or "").strip()
+    content = (data.get("content") or "").strip()
+    tags = (data.get("tags") or "").strip()
+
+    if not title or not content:
+        return jsonify({"error": "Title and content required"}), 400
+
+    payload = {
+        "owner_id": owner["id"],
+        "title": title,
+        "content": content,
+        "tags": tags,
+        "is_global": False
+    }
+
+    if entry_id:
+        r = requests.patch(
+            f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&owner_id=eq.{owner['id']}",
+            headers={**SB_HEADERS(), "Prefer": "return=representation"},
+            json=payload
+        )
+    else:
+        r = requests.post(
+            f"{SB_URL}/rest/v1/knowledge_base",
+            headers={**SB_HEADERS(), "Prefer": "return=representation"},
+            json=payload
+        )
+
+    if r.status_code not in [200, 201]:
+        return jsonify({"error": "Failed to save entry", "detail": r.text}), 500
+
+    saved = r.json()
+    return_id = saved[0]["id"] if saved else entry_id
+    return jsonify({"success": True, "id": return_id})
+
+
+@app.route("/kb/delete", methods=["POST", "OPTIONS"])
+def kb_delete():
+    """Delete a knowledge base entry (owner only)."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    owner, err = require_owner(token)
+    if err:
+        return err
+
+    data = request.get_json()
+    entry_id = data.get("id")
+    if not entry_id:
+        return jsonify({"error": "id required"}), 400
+
+    requests.delete(
+        f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&owner_id=eq.{owner['id']}",
+        headers=SB_HEADERS()
+    )
     return jsonify({"success": True})
 
 
