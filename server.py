@@ -2854,41 +2854,113 @@ def kb_search():
             headers=SB_HEADERS()
         )
     else:
-        # Full-text search via Supabase's textSearch
-        # Build keyword list — strip stopwords, join remaining terms
-        stopwords = {'what','is','the','for','an','a','of','on','to','in','do','i','my',
+        import re as _re
+
+        STOPWORDS = {'what','is','the','for','an','a','of','on','to','in','do','i','my',
                      'how','does','which','are','and','or','with','use','need','can','get',
                      'have','has','that','this','at','it','its','by','be','was','used',
-                     'tell','me','about','give','find','show','should'}
-        import re as _re
-        words = [w for w in _re.sub(r'[^a-z0-9]', ' ', query.lower()).split()
-                 if len(w) > 1 and w not in stopwords]
+                     'tell','me','about','give','find','show','should','when','where',
+                     'will','would','could','should','if','then','so','but','not'}
 
-        results = []
+        # Simple stemmer — strip common suffixes
+        def stem(w):
+            for suffix in ('ing','tion','ions','ings','ers','ed','es','s'):
+                if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+                    return w[:-len(suffix)]
+            return w
 
-        # Try ilike search on each keyword — collect union of matches
+        # Synonym map — expand each keyword with related terms
+        SYNONYMS = {
+            'thread': ['thread','threading','pitch','muzzle','threaded'],
+            'pitch': ['pitch','thread','threading'],
+            'glock': ['glock','g17','g19','g20','g21','g26','g43'],
+            '9mm': ['9mm','9x19','parabellum','9 mm'],
+            '45': ['45','45acp','45 acp','1911'],
+            'ar': ['ar','ar15','ar-15','m4','m16','223','556','5.56'],
+            'aks': ['ak','ak47','ak-47','7.62'],
+            'nics': ['nics','background','background check','check'],
+            '4473': ['4473','form 4473','atf form'],
+            'denied': ['denied','denial','denied transfer','delay','delayed'],
+            'sot': ['sot','dealer','class 3','nfa','class iii'],
+            'suppressor': ['suppressor','silencer','nfa','form 4','tax stamp'],
+            'pistol': ['pistol','handgun','semi-auto'],
+            'rifle': ['rifle','long gun','carbine'],
+            'shotgun': ['shotgun','long gun','gauge'],
+            'serial': ['serial','serial number','s/n'],
+            'ffl': ['ffl','license','licensed dealer','federal firearms'],
+            'atf': ['atf','bureau','alcohol tobacco'],
+            'transfer': ['transfer','sale','sold','transferor'],
+            'buyer': ['buyer','purchaser','transferee'],
+        }
+
+        # Extract and expand keywords
+        raw_words = [w for w in _re.sub(r'[^a-z0-9]', ' ', query.lower()).split()
+                     if len(w) > 1 and w not in STOPWORDS]
+        stemmed = [stem(w) for w in raw_words]
+
+        # Build expanded search terms
+        search_terms = set()
+        for w in raw_words + stemmed:
+            search_terms.add(w)
+            for syn_key, syn_list in SYNONYMS.items():
+                if w == syn_key or w in syn_list:
+                    search_terms.update(syn_list)
+
+        search_terms = list(search_terms) if search_terms else [query]
+
+        # Fetch candidates via ilike on each term — union with dedup
         seen_ids = set()
-        for word in (words if words else [query]):
-            like_q = f"%{word}%"
+        candidates = []
+        for term in search_terms:
+            like_q = f"%{term}%"
             r2 = requests.get(
-                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)},tags.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)"
+                f"&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)},tags.ilike.{requests.utils.quote(like_q)})"
+                f"&select=id,title,content,tags,is_global,owner_id&order=title.asc",
                 headers=SB_HEADERS()
             )
             for entry in (r2.json() if r2.status_code == 200 else []):
                 if entry['id'] not in seen_ids:
                     seen_ids.add(entry['id'])
-                    results.append(entry)
+                    candidates.append(entry)
 
-        # If still nothing, fall back to full raw query ilike
-        if not results:
+        # Fallback: raw query ilike if nothing found
+        if not candidates:
             like_q = f"%{query}%"
             r3 = requests.get(
-                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})&select=id,title,content,tags,is_global,owner_id&order=title.asc",
+                f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)"
+                f"&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})"
+                f"&select=id,title,content,tags,is_global,owner_id&order=title.asc",
                 headers=SB_HEADERS()
             )
-            results = r3.json() if r3.status_code == 200 else []
+            candidates = r3.json() if r3.status_code == 200 else []
 
-        return jsonify({"results": results, "query": query})
+        # Score each result — count how many search terms appear in title+content+tags
+        def score_entry(entry):
+            haystack = ' '.join([
+                (entry.get('title') or '').lower(),
+                (entry.get('content') or '').lower(),
+                (entry.get('tags') or '').lower()
+            ])
+            # Title matches worth 3x, content/tags 1x
+            title_hay = (entry.get('title') or '').lower()
+            score = 0
+            for term in search_terms:
+                if term in title_hay:
+                    score += 3
+                elif term in haystack:
+                    score += 1
+            # Bonus for original raw keywords matching
+            for w in raw_words:
+                if w in title_hay:
+                    score += 2
+            return score
+
+        scored = [(score_entry(e), e) for e in candidates]
+        scored.sort(key=lambda x: -x[0])
+        results = [e for _, e in scored]
+
+        return jsonify({"results": results, "query": query, "keywords": raw_words})
 
     results = r.json() if r.status_code == 200 else []
     return jsonify({"results": results, "query": query})
