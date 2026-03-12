@@ -2306,11 +2306,14 @@ def create_subuser():
         return err
 
     data = request.get_json()
-    email = (data.get("email") or "").strip().lower()
+    username = (data.get("username") or "").strip().lower()
+    password = (data.get("password") or "").strip()
     can_audit = bool(data.get("can_run_audit", False))
 
-    if not email:
-        return jsonify({"error": "Email required"}), 400
+    if not username:
+        return jsonify({"error": "Username required"}), 400
+    if not password or len(password) < 4:
+        return jsonify({"error": "Password must be at least 4 characters"}), 400
 
     # Check sub-user count (max 6)
     count_r = requests.get(
@@ -2320,16 +2323,27 @@ def create_subuser():
     if count_r.status_code == 200 and len(count_r.json()) >= 6:
         return jsonify({"error": "Maximum of 6 staff accounts reached"}), 400
 
+    # Check username not already taken under this owner
+    ucheck = requests.get(
+        f"{SB_URL}/rest/v1/profiles?username=eq.{username}&parent_user_id=eq.{owner['id']}&select=id",
+        headers=SB_HEADERS()
+    )
+    if ucheck.status_code == 200 and ucheck.json():
+        return jsonify({"error": "Username already taken"}), 400
+
     # Check subscription active
     profile = get_profile(owner["id"])
     if not profile or profile.get("subscription_status") not in ["active", "trialing"]:
         return jsonify({"error": "Active subscription required"}), 403
 
-    # Create Supabase auth user
+    # Generate fake internal email
+    fake_email = f"{username}@{owner['id']}.internal"
+
+    # Create Supabase auth user with password set by owner
     create_r = requests.post(
         f"{SB_URL}/auth/v1/admin/users",
         headers=SB_HEADERS(),
-        json={"email": email, "email_confirm": True, "password": None}
+        json={"email": fake_email, "email_confirm": True, "password": password}
     )
     if create_r.status_code not in [200, 201]:
         body = create_r.json()
@@ -2338,7 +2352,7 @@ def create_subuser():
     new_user = create_r.json()
     new_id = new_user["id"]
 
-    # Upsert profile as staff
+    # Upsert profile as staff with username
     requests.post(
         f"{SB_URL}/rest/v1/profiles",
         headers={**SB_HEADERS(), "Prefer": "resolution=merge-duplicates"},
@@ -2348,21 +2362,12 @@ def create_subuser():
             "parent_user_id": owner["id"],
             "can_run_audit": can_audit,
             "subscription_status": "active",
-            "onboarding_completed": True
+            "onboarding_completed": True,
+            "username": username
         }
     )
 
-    # Send magic link so staff can set password
-    magic_r = requests.post(
-        f"{SB_URL}/auth/v1/admin/generate_link",
-        headers=SB_HEADERS(),
-        json={"type": "magiclink", "email": email}
-    )
-    magic_link = None
-    if magic_r.status_code == 200:
-        magic_link = magic_r.json().get("action_link")
-
-    return jsonify({"success": True, "user_id": new_id, "magic_link": magic_link})
+    return jsonify({"success": True, "user_id": new_id})
 
 
 @app.route("/list-subusers", methods=["GET", "OPTIONS"])
@@ -2375,24 +2380,18 @@ def list_subusers():
         return err
 
     r = requests.get(
-        f"{SB_URL}/rest/v1/profiles?parent_user_id=eq.{owner['id']}&select=id,role,can_run_audit,session_token",
+        f"{SB_URL}/rest/v1/profiles?parent_user_id=eq.{owner['id']}&select=id,role,can_run_audit,username",
         headers=SB_HEADERS()
     )
     if r.status_code != 200:
         return jsonify({"error": "Failed to list staff"}), 500
 
     staff = r.json()
-    # Fetch emails from auth.users via admin API
     result = []
     for s in staff:
-        eu = requests.get(
-            f"{SB_URL}/auth/v1/admin/users/{s['id']}",
-            headers=SB_HEADERS()
-        )
-        email = eu.json().get("email", "") if eu.status_code == 200 else ""
         result.append({
             "id": s["id"],
-            "email": email,
+            "username": s.get("username") or "(no username)",
             "can_run_audit": s.get("can_run_audit", False),
             "active": True
         })
@@ -2464,6 +2463,36 @@ def delete_subuser():
         headers=SB_HEADERS()
     )
     return jsonify({"success": True})
+
+
+@app.route("/lookup-staff-email", methods=["POST", "OPTIONS"])
+def lookup_staff_email():
+    """Given a username, return the fake internal email for Supabase auth."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    data = request.get_json()
+    username = (data.get("username") or "").strip().lower()
+    if not username:
+        return jsonify({"error": "Username required"}), 400
+
+    # Find profile with this username
+    r = requests.get(
+        f"{SB_URL}/rest/v1/profiles?username=eq.{username}&select=id,parent_user_id,role",
+        headers=SB_HEADERS()
+    )
+    if r.status_code != 200 or not r.json():
+        return jsonify({"error": "Username not found"}), 404
+
+    profile = r.json()[0]
+    if profile.get("role") != "staff":
+        return jsonify({"error": "Username not found"}), 404
+
+    owner_id = profile.get("parent_user_id")
+    if not owner_id:
+        return jsonify({"error": "Account configuration error"}), 500
+
+    fake_email = f"{username}@{owner_id}.internal"
+    return jsonify({"email": fake_email})
 
 
 @app.route("/get-my-role", methods=["GET", "OPTIONS"])
