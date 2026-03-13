@@ -2618,19 +2618,24 @@ def get_leaderboard_data():
     except Exception:
         days = 90
 
-    from datetime import datetime, timezone, timedelta
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        from datetime import datetime, timezone, timedelta
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    r = requests.get(
-        f"{SB_URL}/rest/v1/audit_history?profile_id=eq.{owner_id}"
-        f"&select=results,batch_date,total_forms,approved_count,correction_count,block_count"
-        f"&created_at=gte.{since}&order=created_at.desc",
-        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
-    )
-    if r.status_code != 200:
-        return jsonify({"error": "Could not fetch data"}), 500
+        r = requests.get(
+            f"{SB_URL}/rest/v1/audit_history?profile_id=eq.{owner_id}"
+            f"&select=results,batch_date,total_forms,approved_count,correction_count,block_count"
+            f"&created_at=gte.{since}&order=created_at.desc",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        )
+        if r.status_code != 200:
+            return jsonify({"error": "Supabase error", "status": r.status_code, "detail": r.text}), 500
 
-    return jsonify({"rows": r.json()})
+        rows = r.json()
+        return jsonify({"rows": rows, "owner_id": owner_id, "count": len(rows) if isinstance(rows, list) else 0})
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
 # ============================================================
