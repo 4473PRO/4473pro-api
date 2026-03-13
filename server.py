@@ -2620,7 +2620,7 @@ def get_leaderboard_data():
 
     try:
         from datetime import datetime, timezone, timedelta
-        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         r = requests.get(
             f"{SB_URL}/rest/v1/audit_history?profile_id=eq.{owner_id}"
