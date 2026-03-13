@@ -2594,6 +2594,46 @@ def get_my_role():
 
 
 # ============================================================
+# LEADERBOARD / GRADE DATA ENDPOINT
+# ============================================================
+
+@app.route("/get-leaderboard-data", methods=["GET", "OPTIONS"])
+def get_leaderboard_data():
+    """Return audit history for the owner account — accessible by owner and staff alike.
+    Uses service key to bypass RLS so staff tokens can read owner's audit history."""
+    if request.method == "OPTIONS":
+        return _cors_ok()
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    user = get_user_from_token(token)
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    owner_id = get_owner_id(user["id"])
+    if not owner_id:
+        return jsonify({"error": "Account error"}), 400
+
+    days = request.args.get("days", "90")
+    try:
+        days = int(days)
+    except Exception:
+        days = 90
+
+    from datetime import datetime, timezone, timedelta
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    r = requests.get(
+        f"{SB_URL}/rest/v1/audit_history?profile_id=eq.{owner_id}"
+        f"&select=results,batch_date,total_forms,approved_count,correction_count,block_count"
+        f"&created_at=gte.{since}&order=created_at.desc",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    if r.status_code != 200:
+        return jsonify({"error": "Could not fetch data"}), 500
+
+    return jsonify({"rows": r.json()})
+
+
+# ============================================================
 # DAILY TASKS ENDPOINTS
 # ============================================================
 
@@ -2850,7 +2890,7 @@ def kb_search():
     if not query:
         # Return all entries for this account + global, ordered by title
         r = requests.get(
-            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&order=title.asc&select=id,title,content,tags,is_global,owner_id,volatile,last_verified",
+            f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)&order=title.asc&select=id,title,content,tags,is_global,owner_id",
             headers=SB_HEADERS()
         )
     else:
@@ -2916,7 +2956,7 @@ def kb_search():
             r2 = requests.get(
                 f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)"
                 f"&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)},tags.ilike.{requests.utils.quote(like_q)})"
-                f"&select=id,title,content,tags,is_global,owner_id,volatile,last_verified&order=title.asc",
+                f"&select=id,title,content,tags,is_global,owner_id&order=title.asc",
                 headers=SB_HEADERS()
             )
             for entry in (r2.json() if r2.status_code == 200 else []):
@@ -2930,7 +2970,7 @@ def kb_search():
             r3 = requests.get(
                 f"{SB_URL}/rest/v1/knowledge_base?or=(owner_id.eq.{owner_id},is_global.eq.true)"
                 f"&or=(title.ilike.{requests.utils.quote(like_q)},content.ilike.{requests.utils.quote(like_q)})"
-                f"&select=id,title,content,tags,is_global,owner_id,volatile,last_verified&order=title.asc",
+                f"&select=id,title,content,tags,is_global,owner_id&order=title.asc",
                 headers=SB_HEADERS()
             )
             candidates = r3.json() if r3.status_code == 200 else []
@@ -3052,116 +3092,6 @@ def kb_delete():
         headers=SB_HEADERS()
     )
     return jsonify({"success": True})
-
-
-# ── ADMIN GLOBAL KB MANAGEMENT ─────────────────────────────────────────────
-
-@app.route("/admin/kb", methods=["GET", "OPTIONS"])
-def admin_kb_list():
-    """Admin — list all global KB entries, sorted by oldest last_verified for maintenance."""
-    if request.method == "OPTIONS":
-        return "", 200
-    if not verify_admin(request):
-        return jsonify({"error": "Unauthorized"}), 401
-    r = requests.get(
-        f"{SB_URL}/rest/v1/knowledge_base?is_global=eq.true"
-        f"&order=last_verified.asc.nullsfirst,title.asc"
-        f"&select=id,title,content,tags,volatile,last_verified,created_at",
-        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
-    )
-    return jsonify(r.json() if r.status_code == 200 else [])
-
-
-@app.route("/admin/kb/<entry_id>", methods=["POST", "DELETE", "OPTIONS"])
-def admin_kb_entry(entry_id):
-    """Admin — update or delete a global KB entry."""
-    if request.method == "OPTIONS":
-        return "", 200
-    if not verify_admin(request):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    if request.method == "DELETE":
-        requests.delete(
-            f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&is_global=eq.true",
-            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
-        )
-        return jsonify({"success": True})
-
-    # POST = update
-    body = request.get_json()
-    update = {}
-    for field in ["title", "content", "tags", "volatile", "last_verified"]:
-        if field in body:
-            update[field] = body[field]
-    update["updated_at"] = "now()"
-    r = requests.patch(
-        f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&is_global=eq.true",
-        headers={
-            "apikey": SB_SERVICE_KEY,
-            "Authorization": f"Bearer {SB_SERVICE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation"
-        },
-        json=update
-    )
-    if r.status_code not in [200, 201]:
-        return jsonify({"error": "Failed to update entry"}), 500
-    return jsonify({"success": True})
-
-
-@app.route("/admin/kb/mark-verified/<entry_id>", methods=["POST", "OPTIONS"])
-def admin_kb_mark_verified(entry_id):
-    """Admin — mark a volatile KB entry as verified today."""
-    if request.method == "OPTIONS":
-        return "", 200
-    if not verify_admin(request):
-        return jsonify({"error": "Unauthorized"}), 401
-    from datetime import date
-    today = date.today().isoformat()
-    r = requests.patch(
-        f"{SB_URL}/rest/v1/knowledge_base?id=eq.{entry_id}&is_global=eq.true",
-        headers={
-            "apikey": SB_SERVICE_KEY,
-            "Authorization": f"Bearer {SB_SERVICE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        },
-        json={"last_verified": today, "updated_at": "now()"}
-    )
-    return jsonify({"success": True, "last_verified": today})
-
-
-@app.route("/admin/kb", methods=["POST"])
-def admin_kb_add():
-    """Admin — add a new global KB entry."""
-    if not verify_admin(request):
-        return jsonify({"error": "Unauthorized"}), 401
-    body = request.get_json()
-    if not body.get("title") or not body.get("content"):
-        return jsonify({"error": "title and content required"}), 400
-    from datetime import date
-    entry = {
-        "title": body["title"],
-        "content": body["content"],
-        "tags": body.get("tags", ""),
-        "is_global": True,
-        "owner_id": None,
-        "volatile": body.get("volatile", False),
-        "last_verified": body.get("last_verified", date.today().isoformat()),
-    }
-    r = requests.post(
-        f"{SB_URL}/rest/v1/knowledge_base",
-        headers={
-            "apikey": SB_SERVICE_KEY,
-            "Authorization": f"Bearer {SB_SERVICE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation"
-        },
-        json=entry
-    )
-    if r.status_code not in [200, 201]:
-        return jsonify({"error": "Failed to add entry"}), 500
-    return jsonify(r.json())
 
 
 @app.route("/save-ffl-expiration", methods=["POST", "OPTIONS"])
