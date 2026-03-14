@@ -3198,6 +3198,201 @@ def submit_feedback():
     return jsonify({"success": True})
 
 
+@app.route("/track-visit", methods=["POST", "OPTIONS"])
+def track_visit():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json(silent=True) or {}
+    page_path = data.get("page_path", "/")
+    referrer = data.get("referrer", "")
+    user_agent = data.get("user_agent", "")
+    auth_token = data.get("auth_token", "")
+
+    # Get real IP - respect X-Forwarded-For from Netlify/proxies
+    ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
+    if ip_address and "," in ip_address:
+        ip_address = ip_address.split(",")[0].strip()
+
+    account_email = None
+    owner_email = None
+
+    # If user sent an auth token, resolve their identity
+    if auth_token:
+        try:
+            user = sb_get_user(auth_token)
+            if user:
+                account_email = user.get("email", "")
+                user_id = user.get("id", "")
+                # Check if this is a sub-user - look up their owner
+                r = requests.get(
+                    f"{SB_URL}/rest/v1/sub_users?user_id=eq.{user_id}&select=owner_id",
+                    headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+                )
+                if r.status_code == 200 and r.json():
+                    owner_id = r.json()[0].get("owner_id")
+                    if owner_id:
+                        ro = requests.get(
+                            f"{SB_URL}/rest/v1/profiles?id=eq.{owner_id}&select=email",
+                            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+                        )
+                        if ro.status_code == 200 and ro.json():
+                            owner_email = ro.json()[0].get("email", "")
+        except Exception:
+            pass
+
+    requests.post(
+        f"{SB_URL}/rest/v1/site_visits",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        },
+        json={
+            "ip_address": ip_address,
+            "page_path": page_path,
+            "referrer": referrer,
+            "user_agent": user_agent,
+            "account_email": account_email,
+            "owner_email": owner_email
+        }
+    )
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/visitors", methods=["GET", "OPTIONS"])
+def admin_visitors():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not verify_admin(token):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Aggregate visits per IP with page counts, first/last seen
+    r = requests.get(
+        f"{SB_URL}/rest/v1/site_visits?select=ip_address,page_path,account_email,owner_email,visited_at&order=visited_at.desc&limit=5000",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    if r.status_code != 200:
+        return jsonify({"error": "Failed to load visits"}), 500
+
+    visits = r.json()
+
+    # Load ip_labels
+    rl = requests.get(
+        f"{SB_URL}/rest/v1/ip_labels?select=ip_address,label,notes",
+        headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+    )
+    labels = {}
+    if rl.status_code == 200:
+        for row in rl.json():
+            labels[row["ip_address"]] = {"label": row["label"], "notes": row.get("notes", "")}
+
+    # Aggregate by IP
+    ip_data = {}
+    for v in visits:
+        ip = v["ip_address"]
+        if ip not in ip_data:
+            ip_data[ip] = {
+                "ip_address": ip,
+                "visit_count": 0,
+                "pages": {},
+                "first_seen": v["visited_at"],
+                "last_seen": v["visited_at"],
+                "account_email": v.get("account_email"),
+                "owner_email": v.get("owner_email")
+            }
+        ip_data[ip]["visit_count"] += 1
+        page = v["page_path"]
+        ip_data[ip]["pages"][page] = ip_data[ip]["pages"].get(page, 0) + 1
+        if v["visited_at"] < ip_data[ip]["first_seen"]:
+            ip_data[ip]["first_seen"] = v["visited_at"]
+        if v["visited_at"] > ip_data[ip]["last_seen"]:
+            ip_data[ip]["last_seen"] = v["visited_at"]
+        # Keep most recent account/owner info
+        if v.get("account_email") and not ip_data[ip]["account_email"]:
+            ip_data[ip]["account_email"] = v["account_email"]
+        if v.get("owner_email") and not ip_data[ip]["owner_email"]:
+            ip_data[ip]["owner_email"] = v["owner_email"]
+
+    result = []
+    for ip, d in ip_data.items():
+        d["pages"] = [{"path": k, "count": v} for k, v in sorted(d["pages"].items(), key=lambda x: -x[1])]
+        d["label"] = labels.get(ip, {}).get("label", "")
+        d["notes"] = labels.get(ip, {}).get("notes", "")
+        result.append(d)
+
+    # Sort by last_seen desc
+    result.sort(key=lambda x: x["last_seen"], reverse=True)
+
+    # Summary stats
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+
+    def parse_dt(s):
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return now
+
+    all_visits_today = sum(1 for v in visits if parse_dt(v["visited_at"]).date() == today)
+    all_visits_week = sum(1 for v in visits if parse_dt(v["visited_at"]) >= week_ago)
+    all_visits_month = sum(1 for v in visits if parse_dt(v["visited_at"]) >= month_ago)
+
+    return jsonify({
+        "visitors": result,
+        "stats": {
+            "total_ips": len(result),
+            "visits_today": all_visits_today,
+            "visits_week": all_visits_week,
+            "visits_month": all_visits_month
+        }
+    })
+
+
+@app.route("/admin/label-ip", methods=["POST", "OPTIONS"])
+def admin_label_ip():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not verify_admin(token):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    ip_address = data.get("ip_address", "").strip()
+    label = data.get("label", "").strip()
+    notes = data.get("notes", "").strip()
+
+    if not ip_address:
+        return jsonify({"error": "ip_address required"}), 400
+
+    if not label:
+        # Delete label
+        requests.delete(
+            f"{SB_URL}/rest/v1/ip_labels?ip_address=eq.{ip_address}",
+            headers={"apikey": SB_SERVICE_KEY, "Authorization": f"Bearer {SB_SERVICE_KEY}"}
+        )
+        return jsonify({"ok": True})
+
+    # Upsert
+    r = requests.post(
+        f"{SB_URL}/rest/v1/ip_labels",
+        headers={
+            "apikey": SB_SERVICE_KEY,
+            "Authorization": f"Bearer {SB_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal"
+        },
+        json={"ip_address": ip_address, "label": label, "notes": notes, "updated_at": "now()"}
+    )
+    if r.status_code not in [200, 201, 204]:
+        return jsonify({"error": "Failed to save label"}), 500
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8247))
     app.run(host="0.0.0.0", port=port)
